@@ -36,44 +36,6 @@ EchoCareAI is a healthcare voice receptionist that lets patients call in, speak 
 
 On **Railway**, one service runs both processes via `backend/start.sh`: the LiveKit agent worker in the background and FastAPI (uvicorn) in the foreground on `$PORT`.
 
-## Project structure
-
-```
-voice-assistant/
-├── railway.toml              # Deploy config (repo root)
-├── backend/
-│   ├── agent.py              # LiveKit voice agent (Aria)
-│   ├── main.py               # FastAPI server, tokens, REST, WebSocket
-│   ├── start.sh              # Production: agent + uvicorn in one container
-│   ├── tools.py              # Appointment CRUD, slots, identify user
-│   ├── models.py             # SQLAlchemy models
-│   ├── db.py                 # DB engine + migrations runner
-│   ├── phone_utils.py        # Phone normalization / lookup
-│   ├── tool_events.py        # Agent → API → WebSocket activity feed
-│   ├── ws_tools.py           # WebSocket connection manager
-│   ├── migrations/           # SQL migrations (applied on startup)
-│   ├── nixpacks.toml         # Railway/Nixpacks Python version
-│   ├── railway.toml          # Deploy config when Root Directory = /backend
-│   ├── railway.agent.toml    # Optional: separate agent-only Railway service
-│   ├── requirements.txt
-│   └── .env                  # Secrets (not committed)
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx           # Screen routing (call ↔ summary)
-│   │   ├── api.ts            # Backend API + WebSocket URL helpers
-│   │   ├── components/
-│   │   │   ├── VoiceAgent.tsx    # Call UI, LiveKit room, activity feed
-│   │   │   ├── AgentAvatar.tsx   # In-call avatar (speaking animation)
-│   │   │   ├── OrbComponent.tsx  # Canvas plasma orb (available, optional)
-│   │   │   ├── Navbar.tsx
-│   │   │   ├── CallSummary.tsx
-│   │   │   └── ui/avatar.tsx
-│   │   └── hooks/
-│   │       └── useAgentTalking.ts
-│   ├── vite.config.ts
-│   └── package.json
-└── README.md
-```
 
 ## Features
 
@@ -95,50 +57,6 @@ voice-assistant/
   - [Deepgram](https://deepgram.com/) (speech-to-text)
   - [Cartesia](https://cartesia.ai/) (text-to-speech)
 
-## Environment variables
-
-Create `backend/.env` locally (never commit real keys):
-
-```env
-# LiveKit
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=your_api_key
-LIVEKIT_API_SECRET=your_api_secret
-LIVEKIT_AGENT_NAME=mykare-receptionist
-
-# AI providers
-GROQ_API_KEY=your_groq_key
-DEEPGRAM_API_KEY=your_deepgram_key
-CARTESIA_API_KEY=your_cartesia_key
-
-# Optional voice IDs (Cartesia)
-CARTESIA_VOICE_EN=9626c31c-bec5-4cca-baa8-f8ba9e84c8bc
-CARTESIA_VOICE_HI=0f14d8cb-f039-41fe-a813-a9b4bee7eed8
-
-# Database
-DATABASE_URL=sqlite:///./appointments.db
-
-# Optional
-CLINIC_TIMEZONE=Asia/Kolkata
-API_URL=http://localhost:8000
-CORS_ORIGINS=http://localhost:5173,https://echocareai.vercel.app
-```
-
-### Frontend (build time)
-
-Set in Vercel (or `.env` for local builds):
-
-```env
-VITE_API_BASE_URL=https://healthcare-ai-receptionist-production.up.railway.app
-```
-
-Vite bakes this into the bundle at **build time**. After changing it, redeploy the frontend.
-
-### Railway (backend service)
-
-Copy the same `backend/.env` values into **Railway → Variables** for the API service. When API and agent run in one container (`start.sh`), they share the same env.
-
-`API_URL` defaults to `http://127.0.0.1:$PORT` in `tool_events.py` so the agent can POST tool events to the local FastAPI process inside the same container. You usually do not need to set `API_URL` on Railway unless debugging.
 
 ## Setup
 
@@ -245,34 +163,6 @@ For higher reliability, you can run API and agent separately:
 | Agent | `python agent.py start` | No |
 
 See `backend/railway.agent.toml` for the agent-only config. Both services need the same LiveKit and AI provider env vars.
-
-## Deploying to Vercel (frontend)
-
-1. Import the repo and set **Root Directory** to `frontend`.
-2. Add environment variable:
-   ```env
-   VITE_API_BASE_URL=https://your-railway-service.up.railway.app
-   ```
-3. Deploy. Redeploy after any change to `VITE_API_BASE_URL`.
-4. Add your Vercel URL to `CORS_ORIGINS` on Railway if it is not already covered (default includes `https://echocareai.vercel.app`).
-
-## API reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Health check |
-| `POST` | `/token` | Issue LiveKit room token + dispatch agent |
-| `POST` | `/api/identify` | Find or create user by phone |
-| `POST` | `/api/slots` | Available slots for a date |
-| `POST` | `/api/book` | Book appointment |
-| `GET` | `/api/appointments/{user_id}` | List active appointments |
-| `DELETE` | `/api/appointments/{id}?user_id=` | Cancel appointment |
-| `PATCH` | `/api/appointments/{id}` | Reschedule appointment |
-| `POST` | `/api/conversation/end` | Save conversation summary |
-| `WS` | `/ws/tools/{room_name}` | Real-time tool activity feed |
-| `POST` | `/api/tools/emit` | Internal: agent → WebSocket broadcast |
-
-WebSocket URLs use `wss://` when `VITE_API_BASE_URL` is HTTPS (see `frontend/src/api.ts`).
 
 ## Database schema
 
