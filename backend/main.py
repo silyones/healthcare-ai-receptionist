@@ -31,7 +31,7 @@ _cors_origins = [
     origin.strip()
     for origin in os.getenv(
         "CORS_ORIGINS",
-        "http://localhost:5173,https://echocare-tau.vercel.app",
+        "http://localhost:5173,https://echocareai.vercel.app",
     ).split(",")
     if origin.strip()
 ]
