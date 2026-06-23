@@ -1,109 +1,194 @@
+import json
 import os
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, JobContext, RunContext, WorkerOptions, cli
+from livekit.agents.llm import function_tool
 from livekit.plugins import cartesia, deepgram, groq
 
 from db import SessionLocal, init_db
 from tools import (
     book_appointment,
     cancel_appointment,
+    end_conversation,
     fetch_slots,
-    get_user_appointments,
     identify_user,
-    register_user,
+    modify_appointment,
+    retrieve_appointments,
 )
 
 load_dotenv()
 
+# Jacqueline (English) and Nisha (Hindi) — stable voices for voice agents per Cartesia docs
 EN_VOICE = os.getenv("CARTESIA_VOICE_EN", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc")
 HI_VOICE = os.getenv("CARTESIA_VOICE_HI", "0f14d8cb-f039-41fe-a813-a9b4bee7eed8")
 
+SYSTEM_PROMPT = """You are a helpful front-desk AI assistant for a healthcare clinic. Your name is Aria. Start by greeting the user and asking for their phone number to identify them. Help them book, check, modify, or cancel appointments. Always confirm details before booking. Be concise and clear.
 
-class ReceptionistAgent(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions=(
-                "You are a friendly healthcare receptionist. "
-                "Help patients identify themselves, check available slots, "
-                "book or cancel appointments, and answer general questions."
-            )
-        )
-        self._db = SessionLocal()
-        self._user_id: int | None = None
+Voice output rules (everything you say is spoken aloud by Cartesia Sonic TTS):
+- Use full sentences with normal capitalization and end each reply with . ? or !
+- Write times with a space before AM/PM, like 10:00 AM or 2:00 PM.
+- Write dates in MM/DD/YYYY when speaking to the user.
+- For confirmation codes or reference numbers, use <spell>...</spell> tags or space-delimited characters.
+- Do not use markdown, bullet lists, JSON, emoji, or symbols that sound awkward when read aloud.
+- Keep responses short and conversational for a stable clinic reception experience."""
 
-    async def on_enter(self):
-        await self.session.say(
-            "Hello! Welcome to the clinic. How can I help you today?",
-            allow_interruptions=True,
-        )
 
-    @Agent.tool()
-    async def identify_user_by_phone(self, phone: str) -> str:
-        result = identify_user(self._db, phone)
-        if result["found"]:
-            self._user_id = result["user_id"]
-            return f"Welcome back, {result['name']}!"
-        return result["message"]
+@dataclass
+class ClinicUserData:
+    user_id: int | None = None
 
-    @Agent.tool()
-    async def register_new_user(self, name: str, phone: str) -> str:
-        result = register_user(self._db, name, phone)
-        if result["success"]:
-            self._user_id = result["user_id"]
-            return f"Registered {result['name']} successfully."
-        return result["message"]
 
-    @Agent.tool()
-    async def check_available_slots(
-        self, title: str, date: str, duration_minutes: int = 30
+def build_agent_tools(llm: groq.LLM) -> list:
+    """Register tools from tools.py as LLM function tools.
+
+    LiveKit Agents 1.5+ uses function_tool (successor to the legacy llm.ai_callable decorator).
+    """
+
+    @function_tool
+    async def identify_user_tool(
+        ctx: RunContext[ClinicUserData], phone_number: str
     ) -> str:
-        result = fetch_slots(self._db, title, date, duration_minutes)
-        slots = result["available_slots"]
-        if not slots:
-            return f"No slots available for {title} on {date}."
-        return f"Available slots: {', '.join(slots)}"
+        """Find or create a user by phone number and return their profile."""
+        db = SessionLocal()
+        try:
+            result = await identify_user(db, phone_number)
+            ctx.userdata.user_id = result["id"]
+            return json.dumps(result)
+        finally:
+            db.close()
 
-    @Agent.tool()
-    async def book_appointment_slot(self, title: str, date: str, time: str) -> str:
-        if not self._user_id:
-            return "Please identify yourself first before booking."
-        result = book_appointment(self._db, self._user_id, title, date, time)
-        if result["success"]:
-            return f"Booked '{result['title']}' on {result['date']} at {result['time']}."
-        return result["message"]
+    @function_tool
+    async def fetch_slots_tool(ctx: RunContext[ClinicUserData], date: str) -> str:
+        """Return available appointment slots for a given date (YYYY-MM-DD)."""
+        db = SessionLocal()
+        try:
+            slots = await fetch_slots(db, date)
+            return json.dumps({"date": date, "available_slots": slots})
+        finally:
+            db.close()
 
-    @Agent.tool()
-    async def cancel_appointment_by_id(self, appointment_id: int) -> str:
-        result = cancel_appointment(self._db, appointment_id)
-        if result["success"]:
-            return f"Appointment {appointment_id} cancelled."
-        return result["message"]
+    @function_tool
+    async def book_appointment_tool(
+        ctx: RunContext[ClinicUserData],
+        name: str,
+        date: str,
+        time: str,
+    ) -> str:
+        """Book an appointment after confirming the user's name, date, and time."""
+        if ctx.userdata.user_id is None:
+            return json.dumps({"success": False, "message": "Identify the user first."})
+        db = SessionLocal()
+        try:
+            result = await book_appointment(
+                db, ctx.userdata.user_id, name, date, time
+            )
+            return json.dumps(result)
+        finally:
+            db.close()
 
-    @Agent.tool()
-    async def list_my_appointments(self) -> str:
-        if not self._user_id:
-            return "Please identify yourself first."
-        result = get_user_appointments(self._db, self._user_id)
-        if not result["appointments"]:
-            return "You have no upcoming appointments."
-        lines = [
-            f"#{a['id']}: {a['title']} on {a['date']} at {a['time']}"
-            for a in result["appointments"]
-        ]
-        return "Your appointments: " + "; ".join(lines)
+    @function_tool
+    async def retrieve_appointments_tool(ctx: RunContext[ClinicUserData]) -> str:
+        """List active appointments for the identified user."""
+        if ctx.userdata.user_id is None:
+            return json.dumps({"success": False, "message": "Identify the user first."})
+        db = SessionLocal()
+        try:
+            appointments = await retrieve_appointments(db, ctx.userdata.user_id)
+            return json.dumps({"appointments": appointments})
+        finally:
+            db.close()
+
+    @function_tool
+    async def cancel_appointment_tool(
+        ctx: RunContext[ClinicUserData], appointment_id: int
+    ) -> str:
+        """Cancel an appointment by ID for the identified user."""
+        if ctx.userdata.user_id is None:
+            return json.dumps({"success": False, "message": "Identify the user first."})
+        db = SessionLocal()
+        try:
+            result = await cancel_appointment(
+                db, appointment_id, ctx.userdata.user_id
+            )
+            return json.dumps(result)
+        finally:
+            db.close()
+
+    @function_tool
+    async def modify_appointment_tool(
+        ctx: RunContext[ClinicUserData],
+        appointment_id: int,
+        new_date: str,
+        new_time: str,
+    ) -> str:
+        """Reschedule an appointment to a new date and time."""
+        if ctx.userdata.user_id is None:
+            return json.dumps({"success": False, "message": "Identify the user first."})
+        db = SessionLocal()
+        try:
+            result = await modify_appointment(
+                db,
+                appointment_id,
+                ctx.userdata.user_id,
+                new_date,
+                new_time,
+            )
+            return json.dumps(result)
+        finally:
+            db.close()
+
+    @function_tool
+    async def end_conversation_tool(
+        ctx: RunContext[ClinicUserData], summary: str
+    ) -> str:
+        """End the conversation, store a summary, and return final details."""
+        if ctx.userdata.user_id is None:
+            return json.dumps({"success": False, "message": "Identify the user first."})
+        db = SessionLocal()
+        try:
+            result = await end_conversation(db, ctx.userdata.user_id, summary)
+            return json.dumps(result)
+        finally:
+            db.close()
+
+    # llm reference keeps tool registration tied to the configured Groq model
+    _ = llm
+    return [
+        identify_user_tool,
+        fetch_slots_tool,
+        book_appointment_tool,
+        retrieve_appointments_tool,
+        cancel_appointment_tool,
+        modify_appointment_tool,
+        end_conversation_tool,
+    ]
+
+
+class AriaAgent(Agent):
+    def __init__(self, tools: list) -> None:
+        super().__init__(instructions=SYSTEM_PROMPT, tools=tools)
 
 
 async def entrypoint(ctx: JobContext):
     init_db()
 
-    session = AgentSession(
+    llm = groq.LLM(model="llama-3.3-70b-versatile")
+    tools = build_agent_tools(llm)
+
+    session = AgentSession[ClinicUserData](
         stt=deepgram.STT(model="nova-2"),
-        llm=groq.LLM(model="llama-3.3-70b-versatile"),
-        tts=cartesia.TTS(voice=EN_VOICE),
+        llm=llm,
+        tts=cartesia.TTS(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            model="sonic-3",
+            voice=EN_VOICE,
+        ),
+        userdata=ClinicUserData(),
     )
 
-    await session.start(agent=ReceptionistAgent(), room=ctx.room)
+    await session.start(agent=AriaAgent(tools=tools), room=ctx.room)
     await ctx.connect()
 
 

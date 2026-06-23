@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS appointments (
     user_id INTEGER NOT NULL,
     title VARCHAR(255) NOT NULL,
     date VARCHAR(10) NOT NULL,
-    time VARCHAR(5) NOT NULL,
+    time VARCHAR(20) NOT NULL,
     google_event_id VARCHAR(255),
     status VARCHAR(20) NOT NULL DEFAULT 'active',
     FOREIGN KEY (user_id) REFERENCES users (id)

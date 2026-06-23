@@ -85,7 +85,7 @@ def auth_status(phone: str, db: Session = Depends(get_db)):
     }
 
 
-def get_calendar_service(user: User) -> Any:
+def get_calendar_service(user: User) -> tuple[Any, Any]:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
 
@@ -96,4 +96,11 @@ def get_calendar_service(user: User) -> Any:
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
-    return build("calendar", "v3", credentials=credentials)
+    service = build("calendar", "v3", credentials=credentials)
+    return service, credentials
+
+
+def persist_refreshed_token(user: User, credentials: Any, db: Session) -> None:
+    if credentials.token and credentials.token != user.google_access_token:
+        user.google_access_token = credentials.token
+        db.commit()

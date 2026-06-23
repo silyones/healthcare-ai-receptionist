@@ -1,90 +1,154 @@
+import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
+from googleapiclient.errors import HttpError
 from sqlalchemy.orm import Session
 
-from models import Appointment, User
+from auth import get_calendar_service, persist_refreshed_token
+from models import Appointment, ConversationSummary, User
+
+HARDCODED_SLOTS = ["10:00 AM", "11:00 AM", "2:00 PM", "4:00 PM"]
+CALENDAR_TIMEZONE = "UTC"
+APPOINTMENT_DURATION_MINUTES = 30
 
 
-def identify_user(db: Session, phone: str) -> dict[str, Any]:
-    user = db.query(User).filter(User.phone_number == phone).first()
-    if user:
-        return {
-            "found": True,
-            "user_id": user.id,
-            "name": user.name,
-            "google_calendar_connected": user.google_calendar_connected,
-        }
-    return {"found": False, "message": "No user found with that phone number."}
+def _user_dict(user: User) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "phone_number": user.phone_number,
+        "name": user.name,
+        "google_calendar_connected": user.google_calendar_connected,
+    }
 
 
-def register_user(db: Session, name: str, phone: str) -> dict[str, Any]:
-    existing = db.query(User).filter(User.phone_number == phone).first()
-    if existing:
-        return {"success": False, "message": "User with this phone already exists."}
+def _appointment_dict(appt: Appointment) -> dict[str, Any]:
+    return {
+        "id": appt.id,
+        "user_id": appt.user_id,
+        "title": appt.title,
+        "date": appt.date,
+        "time": appt.time,
+        "status": appt.status,
+        "google_event_id": appt.google_event_id,
+    }
 
-    user = User(name=name, phone_number=phone)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return {"success": True, "user_id": user.id, "name": user.name}
+
+def _parse_datetime(date: str, time: str) -> datetime:
+    for fmt in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(f"{date} {time}", fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Could not parse date/time: {date} {time}")
 
 
-def fetch_slots(
-    db: Session,
-    title: str,
-    date: str,
-    duration_minutes: int = 30,
-) -> dict[str, Any]:
-    """Return available appointment slots for a given title on a date."""
-    work_start = datetime.strptime(f"{date} 09:00", "%Y-%m-%d %H:%M")
-    work_end = datetime.strptime(f"{date} 17:00", "%Y-%m-%d %H:%M")
+def _create_calendar_event(
+    user: User, title: str, date: str, time: str, db: Session
+) -> str | None:
+    if not user.google_calendar_connected or not user.google_refresh_token:
+        return None
 
-    booked = (
-        db.query(Appointment)
-        .filter(
-            Appointment.title == title,
-            Appointment.date == date,
-            Appointment.status == "active",
-        )
+    start = _parse_datetime(date, time)
+    end = start + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    service, credentials = get_calendar_service(user)
+    event_body = {
+        "summary": title,
+        "start": {
+            "dateTime": start.isoformat(),
+            "timeZone": CALENDAR_TIMEZONE,
+        },
+        "end": {
+            "dateTime": end.isoformat(),
+            "timeZone": CALENDAR_TIMEZONE,
+        },
+    }
+    event = service.events().insert(calendarId="primary", body=event_body).execute()
+    persist_refreshed_token(user, credentials, db)
+    return event.get("id")
+
+
+def _update_calendar_event(
+    user: User, event_id: str, title: str, date: str, time: str, db: Session
+) -> None:
+    if not event_id or not user.google_calendar_connected:
+        return
+
+    start = _parse_datetime(date, time)
+    end = start + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    service, credentials = get_calendar_service(user)
+    event_body = {
+        "summary": title,
+        "start": {"dateTime": start.isoformat(), "timeZone": CALENDAR_TIMEZONE},
+        "end": {"dateTime": end.isoformat(), "timeZone": CALENDAR_TIMEZONE},
+    }
+    service.events().patch(
+        calendarId="primary", eventId=event_id, body=event_body
+    ).execute()
+    persist_refreshed_token(user, credentials, db)
+
+
+def _delete_calendar_event(user: User, event_id: str, db: Session) -> None:
+    if not event_id or not user.google_calendar_connected:
+        return
+
+    service, credentials = get_calendar_service(user)
+    try:
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+    except HttpError as exc:
+        if exc.resp.status != 404:
+            raise
+    persist_refreshed_token(user, credentials, db)
+
+
+def _identify_user_sync(db: Session, phone_number: str) -> dict[str, Any]:
+    user = db.query(User).filter(User.phone_number == phone_number).first()
+    if not user:
+        user = User(phone_number=phone_number, name=f"Guest {phone_number}")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return _user_dict(user)
+
+
+def _fetch_slots_sync(db: Session, date: str) -> list[str]:
+    booked = {
+        row.time
+        for row in db.query(Appointment)
+        .filter(Appointment.date == date, Appointment.status == "active")
         .all()
-    )
-    booked_times = {appt.time for appt in booked}
-
-    slots = []
-    current = work_start
-    while current + timedelta(minutes=duration_minutes) <= work_end:
-        slot = current.strftime("%H:%M")
-        if slot not in booked_times:
-            slots.append(slot)
-        current += timedelta(minutes=duration_minutes)
-
-    return {"title": title, "date": date, "available_slots": slots}
+    }
+    return [slot for slot in HARDCODED_SLOTS if slot not in booked]
 
 
-def book_appointment(
-    db: Session,
-    user_id: int,
-    title: str,
-    date: str,
-    time: str,
+def _book_appointment_sync(
+    db: Session, user_id: int, name: str, date: str, time: str
 ) -> dict[str, Any]:
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         return {"success": False, "message": "User not found."}
 
-    conflict = (
+    if name and name.strip():
+        user.name = name.strip()
+
+    duplicate = (
         db.query(Appointment)
         .filter(
-            Appointment.title == title,
             Appointment.date == date,
             Appointment.time == time,
             Appointment.status == "active",
         )
         .first()
     )
-    if conflict:
-        return {"success": False, "message": "That slot is no longer available."}
+    if duplicate:
+        return {
+            "success": False,
+            "message": f"An appointment already exists on {date} at {time}.",
+        }
+
+    title = name.strip() if name and name.strip() else f"Clinic visit for {user.name}"
+    google_event_id = _create_calendar_event(user, title, date, time, db)
 
     appointment = Appointment(
         user_id=user_id,
@@ -92,6 +156,7 @@ def book_appointment(
         date=date,
         time=time,
         status="active",
+        google_event_id=google_event_id,
     )
     db.add(appointment)
     db.commit()
@@ -99,38 +164,153 @@ def book_appointment(
 
     return {
         "success": True,
-        "appointment_id": appointment.id,
-        "title": title,
-        "date": date,
-        "time": time,
+        "confirmation": {
+            "appointment_id": appointment.id,
+            "title": appointment.title,
+            "date": appointment.date,
+            "time": appointment.time,
+            "calendar_synced": google_event_id is not None,
+        },
     }
 
 
-def cancel_appointment(db: Session, appointment_id: int) -> dict[str, Any]:
-    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
-    if not appointment:
-        return {"success": False, "message": "Appointment not found."}
-
-    appointment.status = "cancelled"
-    db.commit()
-    return {"success": True, "appointment_id": appointment_id}
-
-
-def get_user_appointments(db: Session, user_id: int) -> dict[str, Any]:
+def _retrieve_appointments_sync(db: Session, user_id: int) -> list[dict[str, Any]]:
     appointments = (
         db.query(Appointment)
         .filter(Appointment.user_id == user_id, Appointment.status == "active")
         .order_by(Appointment.date, Appointment.time)
         .all()
     )
+    return [_appointment_dict(appt) for appt in appointments]
+
+
+def _cancel_appointment_sync(
+    db: Session, appointment_id: int, user_id: int
+) -> dict[str, Any]:
+    appointment = (
+        db.query(Appointment)
+        .filter(Appointment.id == appointment_id, Appointment.user_id == user_id)
+        .first()
+    )
+    if not appointment:
+        return {"success": False, "message": "Appointment not found."}
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user and appointment.google_event_id:
+        _delete_calendar_event(user, appointment.google_event_id, db)
+
+    appointment.status = "cancelled"
+    db.commit()
+    return {"success": True, "appointment_id": appointment_id}
+
+
+def _modify_appointment_sync(
+    db: Session,
+    appointment_id: int,
+    user_id: int,
+    new_date: str,
+    new_time: str,
+) -> dict[str, Any]:
+    appointment = (
+        db.query(Appointment)
+        .filter(Appointment.id == appointment_id, Appointment.user_id == user_id)
+        .first()
+    )
+    if not appointment:
+        return {"success": False, "message": "Appointment not found."}
+
+    duplicate = (
+        db.query(Appointment)
+        .filter(
+            Appointment.date == new_date,
+            Appointment.time == new_time,
+            Appointment.status == "active",
+            Appointment.id != appointment_id,
+        )
+        .first()
+    )
+    if duplicate:
+        return {
+            "success": False,
+            "message": f"The slot on {new_date} at {new_time} is already taken.",
+        }
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user and appointment.google_event_id:
+        _update_calendar_event(
+            user, appointment.google_event_id, appointment.title, new_date, new_time, db
+        )
+
+    appointment.date = new_date
+    appointment.time = new_time
+    db.commit()
+    db.refresh(appointment)
+
+    return {"success": True, "appointment": _appointment_dict(appointment)}
+
+
+def _end_conversation_sync(
+    db: Session, user_id: int, summary: str
+) -> dict[str, Any]:
+    record = ConversationSummary(user_id=user_id, summary=summary)
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    appointments = _retrieve_appointments_sync(db, user_id)
     return {
-        "appointments": [
-            {
-                "id": appt.id,
-                "title": appt.title,
-                "date": appt.date,
-                "time": appt.time,
-            }
-            for appt in appointments
-        ]
+        "summary": summary,
+        "appointments": appointments,
+        "timestamp": record.created_at.isoformat(),
     }
+
+
+async def identify_user(db: Session, phone_number: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_identify_user_sync, db, phone_number)
+
+
+async def fetch_slots(db: Session, date: str) -> list[str]:
+    return await asyncio.to_thread(_fetch_slots_sync, db, date)
+
+
+async def book_appointment(
+    db: Session, user_id: int, name: str, date: str, time: str
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _book_appointment_sync, db, user_id, name, date, time
+    )
+
+
+async def retrieve_appointments(db: Session, user_id: int) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_retrieve_appointments_sync, db, user_id)
+
+
+async def cancel_appointment(
+    db: Session, appointment_id: int, user_id: int
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _cancel_appointment_sync, db, appointment_id, user_id
+    )
+
+
+async def modify_appointment(
+    db: Session,
+    appointment_id: int,
+    user_id: int,
+    new_date: str,
+    new_time: str,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _modify_appointment_sync,
+        db,
+        appointment_id,
+        user_id,
+        new_date,
+        new_time,
+    )
+
+
+async def end_conversation(
+    db: Session, user_id: int, summary: str
+) -> dict[str, Any]:
+    return await asyncio.to_thread(_end_conversation_sync, db, user_id, summary)

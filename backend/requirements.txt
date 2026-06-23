@@ -4,6 +4,7 @@ livekit-agents
 livekit-plugins-deepgram
 livekit-plugins-cartesia
 livekit-plugins-groq
+livekit-api
 sqlalchemy
 python-dotenv
 google-auth-oauthlib
