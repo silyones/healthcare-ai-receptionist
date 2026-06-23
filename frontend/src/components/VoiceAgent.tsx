@@ -8,9 +8,9 @@ import {
   useRemoteParticipants,
   useRoomContext,
 } from '@livekit/components-react'
-import { ConnectionState, RoomEvent } from 'livekit-client'
-import { getLiveKitToken } from '../api'
-import type { CallSummaryData, ToolFeedItem } from '../types'
+import { ConnectionState } from 'livekit-client'
+import { getLiveKitToken, getToolsWsUrl } from '../api'
+import type { CallSummaryData, ToolFeedItem, ToolWsMessage } from '../types'
 
 type Props = {
   phone: string
@@ -37,10 +37,27 @@ function ToolFeed({ items }: { items: ToolFeedItem[] }) {
         {items.map((item) => (
           <div
             key={item.id}
-            className="bg-navy/50 rounded-lg px-3 py-2 text-sm text-white/90"
+            className={`rounded-lg px-3 py-3 text-sm border ${
+              item.status === 'running'
+                ? 'bg-navy/50 border-accent/40 text-white/90'
+                : 'bg-navy/70 border-accent/20 text-white'
+            }`}
           >
-            <span className="text-accent mr-2">›</span>
-            {item.message}
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-accent text-xs font-semibold uppercase tracking-wide">
+                {item.tool.replace(/_/g, ' ')}
+              </span>
+              <span
+                className={`text-xs px-2 py-0.5 rounded-full ${
+                  item.status === 'running'
+                    ? 'bg-accent/20 text-accent animate-pulse'
+                    : 'bg-accent/10 text-accent'
+                }`}
+              >
+                {item.status}
+              </span>
+            </div>
+            <p>{item.message}</p>
           </div>
         ))}
         <div ref={bottomRef} />
@@ -94,9 +111,11 @@ function MicIndicator({ active }: { active: boolean }) {
 
 function CallUI({
   phone,
+  roomName,
   onEndCall,
 }: {
   phone: string
+  roomName: string
   onEndCall: (summary: CallSummaryData) => void
 }) {
   const room = useRoomContext()
@@ -110,56 +129,53 @@ function CallUI({
   const [feedItems, setFeedItems] = useState<ToolFeedItem[]>([])
   const [ending, setEnding] = useState(false)
 
-  const addFeedItem = (message: string) => {
+  const addFeedItem = (data: ToolWsMessage) => {
     setFeedItems((prev) => [
       ...prev,
-      { id: `${Date.now()}-${prev.length}`, message, timestamp: new Date() },
+      {
+        id: `${Date.now()}-${prev.length}`,
+        tool: data.tool,
+        status: data.status,
+        message: data.message,
+        timestamp: new Date(),
+      },
     ])
+
+    if (
+      data.tool === 'end_conversation' &&
+      data.status === 'done' &&
+      data.summary
+    ) {
+      onEndCall({
+        summary: data.summary,
+        appointments: data.appointments ?? [],
+        timestamp: data.timestamp ?? new Date().toISOString(),
+      })
+    }
   }
 
   useEffect(() => {
-    if (connectionState === ConnectionState.Connected) {
-      addFeedItem('Connected to voice room')
-    }
-  }, [connectionState])
+    const ws = new WebSocket(getToolsWsUrl(roomName))
 
-  useEffect(() => {
-    if (!room) return
-
-    const onData = (payload: Uint8Array) => {
+    ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(new TextDecoder().decode(payload)) as {
-          type?: string
-          message?: string
-          summary?: string
-          appointments?: CallSummaryData['appointments']
-          timestamp?: string
-        }
-        if (data.type === 'tool' && data.message) {
-          addFeedItem(data.message)
-        }
-        if (data.type === 'summary' && data.summary) {
-          onEndCall({
-            summary: data.summary,
-            appointments: data.appointments ?? [],
-            timestamp: data.timestamp ?? new Date().toISOString(),
-          })
+        const data = JSON.parse(event.data) as ToolWsMessage
+        if (data.tool && data.status && data.message) {
+          addFeedItem(data)
         }
       } catch {
-        // ignore non-json payloads
+        // ignore malformed messages
       }
     }
 
-    room.on(RoomEvent.DataReceived, onData)
     return () => {
-      room.off(RoomEvent.DataReceived, onData)
+      ws.close()
     }
-  }, [room, onEndCall])
+  }, [roomName])
 
   const handleEndCall = async () => {
     if (ending) return
     setEnding(true)
-    addFeedItem('Ending call…')
     room.disconnect()
     onEndCall({
       summary: 'Call ended. Thank you for visiting the clinic.',
@@ -291,7 +307,7 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
       video={false}
       onDisconnected={onCancel}
     >
-      <CallUI phone={phone} onEndCall={onEndCall} />
+      <CallUI phone={phone} roomName={roomName} onEndCall={onEndCall} />
     </LiveKitRoom>
   )
 }

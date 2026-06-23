@@ -1,5 +1,10 @@
 export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
+export function getToolsWsUrl(roomName: string): string {
+  const wsBase = API_URL.replace(/^http/, 'ws')
+  return `${wsBase}/ws/tools/${encodeURIComponent(roomName)}`
+}
+
 export async function apiFetch<T>(
   path: string,
   options?: RequestInit,

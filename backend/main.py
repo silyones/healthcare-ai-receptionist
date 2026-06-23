@@ -2,7 +2,7 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
 from pydantic import BaseModel
@@ -19,6 +19,7 @@ from tools import (
     modify_appointment,
     retrieve_appointments,
 )
+from ws_tools import tool_ws_manager
 
 load_dotenv()
 
@@ -74,6 +75,16 @@ class TokenRequest(BaseModel):
     participant_name: str = "clinic-user"
 
 
+class ToolEmitRequest(BaseModel):
+    room_name: str
+    tool: str
+    status: str
+    message: str
+    summary: str | None = None
+    appointments: list | None = None
+    timestamp: str | None = None
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -96,6 +107,23 @@ def create_livekit_token(req: TokenRequest):
         .to_jwt()
     )
     return {"token": token, "url": livekit_url, "room": req.room_name}
+
+
+@app.websocket("/ws/tools/{room_name}")
+async def tools_websocket(websocket: WebSocket, room_name: str):
+    await tool_ws_manager.connect(room_name, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        tool_ws_manager.disconnect(room_name, websocket)
+
+
+@app.post("/api/tools/emit")
+async def api_emit_tool_event(req: ToolEmitRequest):
+    payload = req.model_dump(exclude={"room_name"}, exclude_none=True)
+    await tool_ws_manager.broadcast(req.room_name, payload)
+    return {"ok": True}
 
 
 @app.post("/api/identify")
