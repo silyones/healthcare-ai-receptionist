@@ -1,11 +1,10 @@
-#!/usr/bin/env sh
+#!/bin/sh
 set -e
 
-cd "$(dirname "$0")"
 PORT="${PORT:-8000}"
 
-echo "Starting LiveKit agent worker..."
+echo "Starting LiveKit agent worker in background..."
 python agent.py start &
 
-echo "Starting FastAPI on port ${PORT}..."
-exec uvicorn main:app --host 0.0.0.0 --port "$PORT"
+echo "Starting FastAPI on 0.0.0.0:${PORT}..."
+exec python -m uvicorn main:app --host 0.0.0.0 --port "$PORT"
