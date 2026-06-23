@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+_port = os.getenv("PORT", "8000")
+API_URL = os.getenv("API_URL", f"http://127.0.0.1:{_port}")
 
 
 async def emit_tool_event(
