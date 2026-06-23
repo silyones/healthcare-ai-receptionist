@@ -258,4 +258,4 @@ Serve `frontend/dist` via any static host; set `VITE_API_URL` to your API origin
 
 ## License
 
-Private / internal use unless otherwise specified.
+MIT
