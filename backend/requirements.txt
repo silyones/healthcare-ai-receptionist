@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+livekit-agents
+livekit-plugins-deepgram
+livekit-plugins-cartesia
+livekit-plugins-groq
+sqlalchemy
+python-dotenv
+google-auth-oauthlib
+google-api-python-client
+python-multipart
