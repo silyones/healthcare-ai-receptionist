@@ -1,1 +1,55 @@
 @import "tailwindcss";
+@import "@livekit/components-styles";
+
+@theme {
+  --color-navy: #0d2b3e;
+  --color-accent: #00c9b1;
+  --color-button-dark: #1a3a4a;
+  --color-card: #ffffff;
+  --color-text-light: #0d2b3e;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--color-navy);
+  color: white;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  70% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+@keyframes waveform {
+  0%,
+  100% {
+    height: 0.35rem;
+  }
+  50% {
+    height: 1.5rem;
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+.waveform-bar {
+  animation: waveform 0.8s ease-in-out infinite;
+}

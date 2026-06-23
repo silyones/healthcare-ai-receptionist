@@ -17,6 +17,30 @@ Base = declarative_base()
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+    """Split a SQL file into individual statements for SQLite."""
+    statements: list[str] = []
+    current: list[str] = []
+
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("--"):
+            continue
+        current.append(line)
+        if stripped.endswith(";"):
+            statement = "\n".join(current).strip().rstrip(";").strip()
+            if statement:
+                statements.append(statement)
+            current = []
+
+    if current:
+        statement = "\n".join(current).strip().rstrip(";").strip()
+        if statement:
+            statements.append(statement)
+
+    return statements
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -46,7 +70,8 @@ def run_migrations():
             if path.name in applied:
                 continue
             sql = path.read_text(encoding="utf-8")
-            conn.execute(text(sql))
+            for statement in _split_sql_statements(sql):
+                conn.execute(text(statement))
             conn.execute(
                 text("INSERT INTO schema_migrations (filename) VALUES (:filename)"),
                 {"filename": path.name},
