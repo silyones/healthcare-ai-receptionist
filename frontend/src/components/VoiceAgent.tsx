@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -11,6 +11,8 @@ import {
 import { ConnectionState } from 'livekit-client'
 import { getLiveKitToken, getToolsWsUrl } from '../api'
 import type { CallSummaryData, ToolFeedItem, ToolWsMessage } from '../types'
+import CalendarExpiredBanner from './CalendarExpiredBanner'
+import LoadingSpinner from './LoadingSpinner'
 
 type Props = {
   phone: string
@@ -26,11 +28,11 @@ function ToolFeed({ items }: { items: ToolFeedItem[] }) {
   }, [items])
 
   return (
-    <div className="bg-button-dark/60 rounded-xl p-4 h-full flex flex-col min-h-0">
-      <h3 className="text-accent text-sm font-semibold uppercase tracking-wide mb-3">
+    <div className="bg-button-dark/60 rounded-xl p-3 sm:p-4 h-full flex flex-col min-h-[200px] lg:min-h-0">
+      <h3 className="text-accent text-xs sm:text-sm font-semibold uppercase tracking-wide mb-3">
         Activity Feed
       </h3>
-      <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+      <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[40vh] lg:max-h-none">
         {items.length === 0 && (
           <p className="text-white/50 text-sm">Waiting for agent activity…</p>
         )}
@@ -40,24 +42,28 @@ function ToolFeed({ items }: { items: ToolFeedItem[] }) {
             className={`rounded-lg px-3 py-3 text-sm border ${
               item.status === 'running'
                 ? 'bg-navy/50 border-accent/40 text-white/90'
-                : 'bg-navy/70 border-accent/20 text-white'
+                : item.status === 'error'
+                  ? 'bg-red-950/40 border-red-400/40 text-white'
+                  : 'bg-navy/70 border-accent/20 text-white'
             }`}
           >
             <div className="flex items-center justify-between gap-2 mb-1">
-              <span className="text-accent text-xs font-semibold uppercase tracking-wide">
+              <span className="text-accent text-xs font-semibold uppercase tracking-wide truncate">
                 {item.tool.replace(/_/g, ' ')}
               </span>
               <span
-                className={`text-xs px-2 py-0.5 rounded-full ${
+                className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${
                   item.status === 'running'
                     ? 'bg-accent/20 text-accent animate-pulse'
-                    : 'bg-accent/10 text-accent'
+                    : item.status === 'error'
+                      ? 'bg-red-500/20 text-red-300'
+                      : 'bg-accent/10 text-accent'
                 }`}
               >
                 {item.status}
               </span>
             </div>
-            <p>{item.message}</p>
+            <p className="break-words">{item.message}</p>
           </div>
         ))}
         <div ref={bottomRef} />
@@ -68,7 +74,7 @@ function ToolFeed({ items }: { items: ToolFeedItem[] }) {
 
 function SpeakingAvatar({ speaking }: { speaking: boolean }) {
   return (
-    <div className="relative flex items-center justify-center w-40 h-40">
+    <div className="relative flex items-center justify-center w-32 h-32 sm:w-40 sm:h-40">
       {speaking && (
         <>
           <span className="absolute inset-0 rounded-full border-2 border-accent animate-pulse-ring" />
@@ -79,7 +85,7 @@ function SpeakingAvatar({ speaking }: { speaking: boolean }) {
         </>
       )}
       <div
-        className={`relative z-10 w-28 h-28 rounded-full flex items-center justify-center text-4xl font-bold transition-all duration-300 ${
+        className={`relative z-10 w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center text-3xl sm:text-4xl font-bold transition-all duration-300 ${
           speaking
             ? 'bg-accent text-navy shadow-[0_0_30px_rgba(0,201,177,0.5)]'
             : 'bg-button-dark text-white'
@@ -128,8 +134,11 @@ function CallUI({
 
   const [feedItems, setFeedItems] = useState<ToolFeedItem[]>([])
   const [ending, setEnding] = useState(false)
+  const [calendarExpired, setCalendarExpired] = useState(false)
+  const onEndCallRef = useRef(onEndCall)
+  onEndCallRef.current = onEndCall
 
-  const addFeedItem = (data: ToolWsMessage) => {
+  const handleToolMessage = useCallback((data: ToolWsMessage) => {
     setFeedItems((prev) => [
       ...prev,
       {
@@ -141,18 +150,28 @@ function CallUI({
       },
     ])
 
+    if (data.tool === 'calendar_auth' && data.status === 'error') {
+      setCalendarExpired(true)
+    }
+
+    if (data.tool === 'identify_user' && data.status === 'done' && data.user_name) {
+      localStorage.setItem('clinic_user_name', data.user_name)
+    }
+
     if (
       data.tool === 'end_conversation' &&
       data.status === 'done' &&
       data.summary
     ) {
-      onEndCall({
+      room.disconnect()
+      onEndCallRef.current({
         summary: data.summary,
         appointments: data.appointments ?? [],
+        user_name: data.user_name ?? localStorage.getItem('clinic_user_name') ?? 'Guest',
         timestamp: data.timestamp ?? new Date().toISOString(),
       })
     }
-  }
+  }, [room])
 
   useEffect(() => {
     const ws = new WebSocket(getToolsWsUrl(roomName))
@@ -161,7 +180,7 @@ function CallUI({
       try {
         const data = JSON.parse(event.data) as ToolWsMessage
         if (data.tool && data.status && data.message) {
-          addFeedItem(data)
+          handleToolMessage(data)
         }
       } catch {
         // ignore malformed messages
@@ -171,15 +190,16 @@ function CallUI({
     return () => {
       ws.close()
     }
-  }, [roomName])
+  }, [roomName, handleToolMessage])
 
-  const handleEndCall = async () => {
+  const handleEndCall = () => {
     if (ending) return
     setEnding(true)
     room.disconnect()
     onEndCall({
       summary: 'Call ended. Thank you for visiting the clinic.',
       appointments: [],
+      user_name: localStorage.getItem('clinic_user_name') ?? 'Guest',
       timestamp: new Date().toISOString(),
     })
   }
@@ -198,33 +218,44 @@ function CallUI({
   }, [connectionState, agentSpeaking])
 
   return (
-    <div className="min-h-screen bg-navy text-white flex flex-col">
-      <header className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold">Aria — Front Desk Assistant</h1>
-          <p className="text-white/60 text-sm">{phone}</p>
+    <div className="flex-1 flex flex-col text-white min-h-0">
+      <div className="px-4 sm:px-6 py-3 border-b border-white/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm sm:text-base font-semibold truncate">
+            Aria — Front Desk Assistant
+          </p>
+          <p className="text-white/60 text-xs sm:text-sm truncate">{phone}</p>
         </div>
-        <span className="text-accent text-sm">{statusLabel}</span>
-      </header>
+        <span className="text-accent text-xs sm:text-sm shrink-0">{statusLabel}</span>
+      </div>
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 p-6 min-h-0">
-        <div className="flex flex-col items-center justify-center gap-6">
+      {calendarExpired && (
+        <div className="px-4 sm:px-6 pt-4">
+          <CalendarExpiredBanner
+            phone={phone}
+            onDismiss={() => setCalendarExpired(false)}
+          />
+        </div>
+      )}
+
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_minmax(260px,320px)] gap-4 sm:gap-6 p-4 sm:p-6 min-h-0 overflow-auto">
+        <div className="flex flex-col items-center justify-center gap-4 sm:gap-6 order-2 lg:order-1">
           <SpeakingAvatar speaking={agentSpeaking} />
-          <p className="text-white/70 text-center max-w-md">
+          <p className="text-white/70 text-center max-w-md text-sm sm:text-base px-2">
             Speak naturally to book, check, modify, or cancel appointments.
           </p>
         </div>
 
-        <div className="min-h-[280px] lg:min-h-0">
+        <div className="order-1 lg:order-2 min-h-[200px]">
           <ToolFeed items={feedItems} />
         </div>
       </div>
 
-      <footer className="px-6 py-5 border-t border-white/10 bg-button-dark/40">
+      <footer className="px-4 sm:px-6 py-4 sm:py-5 border-t border-white/10 bg-button-dark/40 mt-auto">
         <div className="max-w-3xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <MicIndicator active={micActive} />
-            <span className="text-sm text-white/70">
+            <span className="text-xs sm:text-sm text-white/70">
               {micActive ? 'Microphone active' : 'Microphone muted'}
             </span>
           </div>
@@ -232,9 +263,12 @@ function CallUI({
             type="button"
             onClick={handleEndCall}
             disabled={ending}
-            className="bg-red-600 hover:bg-red-700 text-white font-semibold px-6 py-2.5 rounded-lg transition disabled:opacity-60"
+            className="w-full sm:w-auto bg-red-600 hover:bg-red-700 text-white font-semibold px-6 py-2.5 rounded-lg transition disabled:opacity-60 flex items-center justify-center gap-2"
           >
-            End Call
+            {ending && (
+              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            )}
+            {ending ? 'Ending call…' : 'End Call'}
           </button>
         </div>
       </footer>
@@ -247,6 +281,7 @@ function CallUI({
 export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
   const [token, setToken] = useState<string | null>(null)
   const [serverUrl, setServerUrl] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const roomName = useMemo(
@@ -256,6 +291,9 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
+    setError(null)
+
     getLiveKitToken(roomName, phone)
       .then((data) => {
         if (!cancelled) {
@@ -268,20 +306,36 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
           setError(err instanceof Error ? err.message : 'Failed to get token')
         }
       })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      })
+
     return () => {
       cancelled = true
     }
   }, [roomName, phone])
 
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-6">
+        <LoadingSpinner label="Connecting to LiveKit…" />
+      </div>
+    )
+  }
+
   if (error) {
     return (
-      <div className="min-h-screen bg-navy flex items-center justify-center p-6">
-        <div className="bg-card text-text-light rounded-xl p-8 max-w-md text-center">
-          <p className="mb-4">{error}</p>
+      <div className="flex-1 flex items-center justify-center p-4 sm:p-6">
+        <div className="bg-card text-text-light rounded-xl p-6 sm:p-8 max-w-md w-full text-center">
+          <p className="mb-4 text-sm sm:text-base" role="alert">
+            {error}
+          </p>
           <button
             type="button"
             onClick={onCancel}
-            className="bg-button-dark text-white px-6 py-2 rounded-lg"
+            className="bg-button-dark text-white px-6 py-2.5 rounded-lg w-full sm:w-auto"
           >
             Go Back
           </button>
@@ -292,8 +346,8 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
 
   if (!token || !serverUrl) {
     return (
-      <div className="min-h-screen bg-navy flex items-center justify-center">
-        <div className="text-accent animate-pulse">Connecting to LiveKit…</div>
+      <div className="flex-1 flex items-center justify-center">
+        <LoadingSpinner label="Preparing room…" />
       </div>
     )
   }

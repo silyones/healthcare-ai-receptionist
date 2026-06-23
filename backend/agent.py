@@ -79,6 +79,7 @@ def build_agent_tools(llm: groq.LLM) -> list:
                 "identify_user",
                 "done",
                 f"User identified: {result['name']}",
+                user_name=result["name"],
             )
             return json.dumps(result)
         finally:
@@ -119,6 +120,13 @@ def build_agent_tools(llm: groq.LLM) -> list:
             result = await book_appointment(
                 db, ctx.userdata.user_id, name, date, time
             )
+            if result.get("calendar_token_expired"):
+                await _emit(
+                    ctx,
+                    "calendar_auth",
+                    "error",
+                    "Google Calendar session expired. Please reconnect your calendar.",
+                )
             if result.get("success"):
                 display_date = _format_display_date(date)
                 await _emit(
@@ -177,6 +185,13 @@ def build_agent_tools(llm: groq.LLM) -> list:
             result = await cancel_appointment(
                 db, appointment_id, ctx.userdata.user_id
             )
+            if result.get("calendar_token_expired"):
+                await _emit(
+                    ctx,
+                    "calendar_auth",
+                    "error",
+                    "Google Calendar session expired. Please reconnect your calendar.",
+                )
             if result.get("success"):
                 await _emit(
                     ctx,
@@ -215,6 +230,13 @@ def build_agent_tools(llm: groq.LLM) -> list:
                 new_date,
                 new_time,
             )
+            if result.get("calendar_token_expired"):
+                await _emit(
+                    ctx,
+                    "calendar_auth",
+                    "error",
+                    "Google Calendar session expired. Please reconnect your calendar.",
+                )
             if result.get("success"):
                 await _emit(
                     ctx,
@@ -251,6 +273,7 @@ def build_agent_tools(llm: groq.LLM) -> list:
                 "Call summary ready ✅",
                 summary=result.get("summary"),
                 appointments=result.get("appointments"),
+                user_name=result.get("user_name"),
                 timestamp=result.get("timestamp"),
             )
             return json.dumps(result)

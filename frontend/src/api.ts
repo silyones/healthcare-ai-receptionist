@@ -69,6 +69,7 @@ export async function endConversation(userId: number, summary: string) {
       date: string
       time: string
     }>
+    user_name: string
     timestamp: string
   }>('/api/conversation/end', {
     method: 'POST',

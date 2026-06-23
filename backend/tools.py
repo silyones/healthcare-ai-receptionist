@@ -14,6 +14,23 @@ CALENDAR_TIMEZONE = "UTC"
 APPOINTMENT_DURATION_MINUTES = 30
 
 
+class CalendarTokenExpiredError(Exception):
+    """Raised when Google Calendar credentials are invalid or expired."""
+
+
+def _invalidate_calendar_tokens(user: User, db: Session) -> None:
+    user.google_calendar_connected = False
+    user.google_access_token = None
+    db.commit()
+
+
+def _handle_calendar_error(exc: HttpError, user: User, db: Session) -> None:
+    if exc.resp.status in (401, 403):
+        _invalidate_calendar_tokens(user, db)
+        raise CalendarTokenExpiredError() from exc
+    raise exc
+
+
 def _user_dict(user: User) -> dict[str, Any]:
     return {
         "id": user.id,
@@ -64,7 +81,11 @@ def _create_calendar_event(
             "timeZone": CALENDAR_TIMEZONE,
         },
     }
-    event = service.events().insert(calendarId="primary", body=event_body).execute()
+    try:
+        event = service.events().insert(calendarId="primary", body=event_body).execute()
+    except HttpError as exc:
+        _handle_calendar_error(exc, user, db)
+
     persist_refreshed_token(user, credentials, db)
     return event.get("id")
 
@@ -83,9 +104,13 @@ def _update_calendar_event(
         "start": {"dateTime": start.isoformat(), "timeZone": CALENDAR_TIMEZONE},
         "end": {"dateTime": end.isoformat(), "timeZone": CALENDAR_TIMEZONE},
     }
-    service.events().patch(
-        calendarId="primary", eventId=event_id, body=event_body
-    ).execute()
+    try:
+        service.events().patch(
+            calendarId="primary", eventId=event_id, body=event_body
+        ).execute()
+    except HttpError as exc:
+        _handle_calendar_error(exc, user, db)
+
     persist_refreshed_token(user, credentials, db)
 
 
@@ -97,8 +122,10 @@ def _delete_calendar_event(user: User, event_id: str, db: Session) -> None:
     try:
         service.events().delete(calendarId="primary", eventId=event_id).execute()
     except HttpError as exc:
-        if exc.resp.status != 404:
-            raise
+        if exc.resp.status == 404:
+            pass
+        else:
+            _handle_calendar_error(exc, user, db)
     persist_refreshed_token(user, credentials, db)
 
 
@@ -148,7 +175,12 @@ def _book_appointment_sync(
         }
 
     title = name.strip() if name and name.strip() else f"Clinic visit for {user.name}"
-    google_event_id = _create_calendar_event(user, title, date, time, db)
+    calendar_token_expired = False
+    google_event_id = None
+    try:
+        google_event_id = _create_calendar_event(user, title, date, time, db)
+    except CalendarTokenExpiredError:
+        calendar_token_expired = True
 
     appointment = Appointment(
         user_id=user_id,
@@ -162,7 +194,7 @@ def _book_appointment_sync(
     db.commit()
     db.refresh(appointment)
 
-    return {
+    response: dict[str, Any] = {
         "success": True,
         "confirmation": {
             "appointment_id": appointment.id,
@@ -172,6 +204,12 @@ def _book_appointment_sync(
             "calendar_synced": google_event_id is not None,
         },
     }
+    if calendar_token_expired:
+        response["calendar_token_expired"] = True
+        response["message"] = (
+            "Appointment saved locally, but Google Calendar access has expired."
+        )
+    return response
 
 
 def _retrieve_appointments_sync(db: Session, user_id: int) -> list[dict[str, Any]]:
@@ -196,12 +234,19 @@ def _cancel_appointment_sync(
         return {"success": False, "message": "Appointment not found."}
 
     user = db.query(User).filter(User.id == user_id).first()
+    calendar_token_expired = False
     if user and appointment.google_event_id:
-        _delete_calendar_event(user, appointment.google_event_id, db)
+        try:
+            _delete_calendar_event(user, appointment.google_event_id, db)
+        except CalendarTokenExpiredError:
+            calendar_token_expired = True
 
     appointment.status = "cancelled"
     db.commit()
-    return {"success": True, "appointment_id": appointment_id}
+    result: dict[str, Any] = {"success": True, "appointment_id": appointment_id}
+    if calendar_token_expired:
+        result["calendar_token_expired"] = True
+    return result
 
 
 def _modify_appointment_sync(
@@ -236,22 +281,38 @@ def _modify_appointment_sync(
         }
 
     user = db.query(User).filter(User.id == user_id).first()
+    calendar_token_expired = False
     if user and appointment.google_event_id:
-        _update_calendar_event(
-            user, appointment.google_event_id, appointment.title, new_date, new_time, db
-        )
+        try:
+            _update_calendar_event(
+                user, appointment.google_event_id, appointment.title, new_date, new_time, db
+            )
+        except CalendarTokenExpiredError:
+            calendar_token_expired = True
 
     appointment.date = new_date
     appointment.time = new_time
     db.commit()
     db.refresh(appointment)
 
-    return {"success": True, "appointment": _appointment_dict(appointment)}
+    result: dict[str, Any] = {"success": True, "appointment": _appointment_dict(appointment)}
+    if calendar_token_expired:
+        result["calendar_token_expired"] = True
+    return result
 
 
 def _end_conversation_sync(
     db: Session, user_id: int, summary: str
 ) -> dict[str, Any]:
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return {
+            "summary": summary,
+            "appointments": [],
+            "user_name": "Guest",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
     record = ConversationSummary(user_id=user_id, summary=summary)
     db.add(record)
     db.commit()
@@ -261,6 +322,7 @@ def _end_conversation_sync(
     return {
         "summary": summary,
         "appointments": appointments,
+        "user_name": user.name,
         "timestamp": record.created_at.isoformat(),
     }
 

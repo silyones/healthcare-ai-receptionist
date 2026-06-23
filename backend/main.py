@@ -82,7 +82,10 @@ class ToolEmitRequest(BaseModel):
     message: str
     summary: str | None = None
     appointments: list | None = None
+    user_name: str | None = None
     timestamp: str | None = None
+
+    model_config = {"extra": "allow"}
 
 
 @app.get("/health")
