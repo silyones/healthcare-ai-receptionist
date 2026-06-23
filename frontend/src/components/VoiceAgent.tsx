@@ -3,12 +3,11 @@ import {
   LiveKitRoom,
   RoomAudioRenderer,
   useConnectionState,
-  useIsSpeaking,
   useLocalParticipant,
   useRemoteParticipants,
   useRoomContext,
 } from '@livekit/components-react'
-import { ConnectionState } from 'livekit-client'
+import { ConnectionState, type RemoteParticipant } from 'livekit-client'
 import { getLiveKitToken, getToolsWsUrl } from '../api'
 import type { CallSummaryData, ToolFeedItem, ToolWsMessage } from '../types'
 import CalendarExpiredBanner from './CalendarExpiredBanner'
@@ -97,6 +96,26 @@ function SpeakingAvatar({ speaking }: { speaking: boolean }) {
   )
 }
 
+function AgentSpeakingAvatar({ participant }: { participant?: RemoteParticipant }) {
+  const [speaking, setSpeaking] = useState(false)
+
+  useEffect(() => {
+    if (!participant) {
+      setSpeaking(false)
+      return
+    }
+
+    const onSpeakingChanged = () => setSpeaking(participant.isSpeaking)
+    onSpeakingChanged()
+    participant.on('isSpeakingChanged', onSpeakingChanged)
+    return () => {
+      participant.off('isSpeakingChanged', onSpeakingChanged)
+    }
+  }, [participant])
+
+  return <SpeakingAvatar speaking={speaking} />
+}
+
 function MicIndicator({ active }: { active: boolean }) {
   const bars = [0, 1, 2, 3, 4, 5, 6]
 
@@ -129,8 +148,21 @@ function CallUI({
   const { isMicrophoneEnabled } = useLocalParticipant()
   const remoteParticipants = useRemoteParticipants()
   const agentParticipant = remoteParticipants[0]
-  const agentSpeaking = useIsSpeaking(agentParticipant)
+  const [agentSpeaking, setAgentSpeaking] = useState(false)
   const micActive = isMicrophoneEnabled && connectionState === ConnectionState.Connected
+
+  useEffect(() => {
+    if (!agentParticipant) {
+      setAgentSpeaking(false)
+      return
+    }
+    const onSpeakingChanged = () => setAgentSpeaking(agentParticipant.isSpeaking)
+    onSpeakingChanged()
+    agentParticipant.on('isSpeakingChanged', onSpeakingChanged)
+    return () => {
+      agentParticipant.off('isSpeakingChanged', onSpeakingChanged)
+    }
+  }, [agentParticipant])
 
   const [feedItems, setFeedItems] = useState<ToolFeedItem[]>([])
   const [ending, setEnding] = useState(false)
@@ -209,13 +241,16 @@ function CallUI({
       case ConnectionState.Connecting:
         return 'Connecting…'
       case ConnectionState.Connected:
+        if (remoteParticipants.length === 0) {
+          return 'Waiting for Aria to join…'
+        }
         return agentSpeaking ? 'Aria is speaking' : 'Listening…'
       case ConnectionState.Disconnected:
         return 'Disconnected'
       default:
         return 'Initializing…'
     }
-  }, [connectionState, agentSpeaking])
+  }, [connectionState, agentSpeaking, remoteParticipants.length])
 
   return (
     <div className="flex-1 flex flex-col text-white min-h-0">
@@ -240,9 +275,12 @@ function CallUI({
 
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_minmax(260px,320px)] gap-4 sm:gap-6 p-4 sm:p-6 min-h-0 overflow-auto">
         <div className="flex flex-col items-center justify-center gap-4 sm:gap-6 order-2 lg:order-1">
-          <SpeakingAvatar speaking={agentSpeaking} />
+          <AgentSpeakingAvatar participant={agentParticipant} />
           <p className="text-white/70 text-center max-w-md text-sm sm:text-base px-2">
-            Speak naturally to book, check, modify, or cancel appointments.
+            {connectionState === ConnectionState.Connected &&
+            remoteParticipants.length === 0
+              ? 'Aria is joining the room. Please allow microphone access when prompted.'
+              : 'Speak naturally to book, check, modify, or cancel appointments.'}
           </p>
         </div>
 
@@ -283,6 +321,7 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
   const [serverUrl, setServerUrl] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [disconnected, setDisconnected] = useState(false)
 
   const roomName = useMemo(
     () => `clinic-${phone.replace(/\D/g, '') || 'guest'}`,
@@ -325,6 +364,26 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
     )
   }
 
+  if (disconnected) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-4 sm:p-6">
+        <div className="bg-card text-text-light rounded-xl p-6 sm:p-8 max-w-md w-full text-center">
+          <p className="mb-4 text-sm sm:text-base">
+            The call was disconnected. Make sure the voice agent is running
+            (`python agent.py dev`).
+          </p>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="bg-button-dark text-white px-6 py-2.5 rounded-lg w-full sm:w-auto"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   if (error) {
     return (
       <div className="flex-1 flex items-center justify-center p-4 sm:p-6">
@@ -359,7 +418,8 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
       connect
       audio
       video={false}
-      onDisconnected={onCancel}
+      onDisconnected={() => setDisconnected(true)}
+      onError={(err) => setError(err?.message ?? 'LiveKit connection failed')}
     >
       <CallUI phone={phone} roomName={roomName} onEndCall={onEndCall} />
     </LiveKitRoom>

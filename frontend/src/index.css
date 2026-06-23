@@ -9,6 +9,10 @@
   --color-text-light: #0d2b3e;
 }
 
+#root {
+  min-height: 100vh;
+}
+
 body {
   margin: 0;
   min-height: 100vh;

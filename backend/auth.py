@@ -1,6 +1,6 @@
 import os
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from db import get_db
 from models import User
+from phone_utils import find_user_by_phone, normalize_phone_digits
 
 load_dotenv()
 
@@ -19,6 +20,15 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.readonly",
 ]
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+# PKCE code_verifier lives on the Flow instance — must reuse it on callback.
+_pending_oauth_flows: dict[str, Flow] = {}
+
+
+def _phone_key(phone: str) -> str:
+    return normalize_phone_digits(phone)
 
 
 def _get_flow() -> Flow:
@@ -38,12 +48,17 @@ def _get_flow() -> Flow:
     )
 
 
+def _frontend_redirect(path: str) -> RedirectResponse:
+    return RedirectResponse(url=f"{FRONTEND_URL}{path}")
+
+
 @router.get("/login")
 def login(phone: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.phone_number == phone).first()
+    user = find_user_by_phone(db, phone)
     if not user:
         raise HTTPException(status_code=404, detail="User not found. Register first.")
 
+    phone_key = _phone_key(phone)
     flow = _get_flow()
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
@@ -51,38 +66,53 @@ def login(phone: str, db: Session = Depends(get_db)):
         prompt="consent",
         state=phone,
     )
+    _pending_oauth_flows[phone_key] = flow
     return RedirectResponse(url=authorization_url)
 
 
 @router.get("/callback")
 def callback(code: str, state: str, db: Session = Depends(get_db)):
     phone_number = unquote(state)
-    flow = _get_flow()
-    flow.fetch_token(code=code)
-    credentials = flow.credentials
+    phone_key = _phone_key(phone_number)
 
-    user = db.query(User).filter(User.phone_number == phone_number).first()
+    flow = _pending_oauth_flows.pop(phone_key, None)
+    if not flow:
+        return _frontend_redirect(
+            f"/?calendar=error&message={quote('OAuth session expired. Please try again.')}"
+        )
+
+    try:
+        flow.fetch_token(code=code)
+    except Exception:
+        return _frontend_redirect(
+            f"/?calendar=error&message={quote('Failed to connect Google Calendar. Please try again.')}"
+        )
+
+    credentials = flow.credentials
+    user = find_user_by_phone(db, phone_number)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     user.google_access_token = credentials.token
     user.google_refresh_token = credentials.refresh_token
-    user.google_calendar_connected = bool(credentials.refresh_token)
+    user.google_calendar_connected = bool(
+        credentials.refresh_token or credentials.token
+    )
     db.commit()
 
-    return RedirectResponse(
-        url=f"http://localhost:5173/?calendar=connected&phone={phone_number}"
+    return _frontend_redirect(
+        f"/?calendar=connected&phone={quote(phone_number)}"
     )
 
 
 @router.get("/status")
 def auth_status(phone: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.phone_number == phone).first()
+    user = find_user_by_phone(db, phone)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     return {
-        "phone_number": phone,
+        "phone_number": user.phone_number,
         "google_calendar_connected": user.google_calendar_connected,
     }
 

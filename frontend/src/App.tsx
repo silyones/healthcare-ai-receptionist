@@ -1,9 +1,12 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import CalendarConnect from './components/CalendarConnect'
 import CallSummary from './components/CallSummary'
+import ErrorBoundary from './components/ErrorBoundary'
+import LoadingSpinner from './components/LoadingSpinner'
 import Navbar from './components/Navbar'
-import VoiceAgent from './components/VoiceAgent'
 import type { AppScreen, CallSummaryData } from './types'
+
+const VoiceAgent = lazy(() => import('./components/VoiceAgent'))
 
 function App() {
   const [screen, setScreen] = useState<AppScreen>('connect')
@@ -13,7 +16,7 @@ function App() {
 
   const navbarSubtitle =
     screen === 'call'
-      ? 'Voice call in progress'
+      ? 'Voice call with Aria'
       : screen === 'summary'
         ? 'Call summary'
         : 'Connect your calendar to get started'
@@ -29,13 +32,22 @@ function App() {
     <div className="min-h-screen bg-navy flex flex-col">
       <Navbar subtitle={navbarSubtitle} />
       <main className="flex-1 flex flex-col min-h-0">
-        {screen === 'call' && phone ? (
-          <VoiceAgent
-            phone={phone}
-            onEndCall={handleEndCall}
-            onCancel={() => setScreen('connect')}
-          />
-        ) : screen === 'summary' && summaryData ? (
+        <ErrorBoundary>
+          {screen === 'call' && phone ? (
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center">
+                  <LoadingSpinner label="Loading call UI…" />
+                </div>
+              }
+            >
+              <VoiceAgent
+                phone={phone}
+                onEndCall={handleEndCall}
+                onCancel={() => setScreen('connect')}
+              />
+            </Suspense>
+          ) : screen === 'summary' && summaryData ? (
           <CallSummary
             data={summaryData}
             loading={summaryLoading}
@@ -52,6 +64,7 @@ function App() {
             }}
           />
         )}
+        </ErrorBoundary>
       </main>
     </div>
   )

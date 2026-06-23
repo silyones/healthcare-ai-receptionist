@@ -2,15 +2,17 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from googleapiclient.errors import HttpError
 from sqlalchemy.orm import Session
 
 from auth import get_calendar_service, persist_refreshed_token
 from models import Appointment, ConversationSummary, User
+from phone_utils import find_user_by_phone
 
-HARDCODED_SLOTS = ["10:00 AM", "11:00 AM", "2:00 PM", "4:00 PM"]
-CALENDAR_TIMEZONE = "UTC"
+HARDCODED_SLOTS = ["10:00 AM", "11:00 AM", "2:00 PM", "3:00 PM", "4:00 PM"]
+CALENDAR_TIMEZONE = os.getenv("CLINIC_TIMEZONE", "Asia/Kolkata")
 APPOINTMENT_DURATION_MINUTES = 30
 
 
@@ -53,12 +55,40 @@ def _appointment_dict(appt: Appointment) -> dict[str, Any]:
 
 
 def _parse_datetime(date: str, time: str) -> datetime:
-    for fmt in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M"):
+    for fmt in (
+        "%Y-%m-%d %I:%M %p",
+        "%Y-%m-%d %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d/%Y %H:%M",
+    ):
         try:
             return datetime.strptime(f"{date} {time}", fmt)
         except ValueError:
             continue
     raise ValueError(f"Could not parse date/time: {date} {time}")
+
+
+def _normalize_date(date: str) -> str:
+    value = (date or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    raise ValueError(f"Could not parse date: {date}")
+
+
+def _clinic_tz() -> ZoneInfo:
+    try:
+        return ZoneInfo(CALENDAR_TIMEZONE)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _calendar_event_times(date: str, time: str) -> tuple[datetime, datetime]:
+    start = _parse_datetime(date, time).replace(tzinfo=_clinic_tz())
+    end = start + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    return start, end
 
 
 def _create_calendar_event(
@@ -67,8 +97,7 @@ def _create_calendar_event(
     if not user.google_calendar_connected or not user.google_refresh_token:
         return None
 
-    start = _parse_datetime(date, time)
-    end = start + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    start, end = _calendar_event_times(date, time)
     service, credentials = get_calendar_service(user)
     event_body = {
         "summary": title,
@@ -96,8 +125,7 @@ def _update_calendar_event(
     if not event_id or not user.google_calendar_connected:
         return
 
-    start = _parse_datetime(date, time)
-    end = start + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    start, end = _calendar_event_times(date, time)
     service, credentials = get_calendar_service(user)
     event_body = {
         "summary": title,
@@ -130,9 +158,10 @@ def _delete_calendar_event(user: User, event_id: str, db: Session) -> None:
 
 
 def _identify_user_sync(db: Session, phone_number: str) -> dict[str, Any]:
-    user = db.query(User).filter(User.phone_number == phone_number).first()
+    user = find_user_by_phone(db, phone_number)
     if not user:
-        user = User(phone_number=phone_number, name=f"Guest {phone_number}")
+        canonical = phone_number.strip()
+        user = User(phone_number=canonical, name=f"Guest {canonical}")
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -140,6 +169,7 @@ def _identify_user_sync(db: Session, phone_number: str) -> dict[str, Any]:
 
 
 def _fetch_slots_sync(db: Session, date: str) -> list[str]:
+    date = _normalize_date(date)
     booked = {
         row.time
         for row in db.query(Appointment)
@@ -152,12 +182,22 @@ def _fetch_slots_sync(db: Session, date: str) -> list[str]:
 def _book_appointment_sync(
     db: Session, user_id: int, name: str, date: str, time: str
 ) -> dict[str, Any]:
+    date = _normalize_date(date)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         return {"success": False, "message": "User not found."}
 
     if name and name.strip():
         user.name = name.strip()
+
+    if not user.google_calendar_connected or not user.google_refresh_token:
+        return {
+            "success": False,
+            "message": (
+                "Google Calendar is not connected for this account. "
+                "Please connect your calendar on the home screen and try again."
+            ),
+        }
 
     duplicate = (
         db.query(Appointment)
@@ -206,9 +246,22 @@ def _book_appointment_sync(
     }
     if calendar_token_expired:
         response["calendar_token_expired"] = True
+        response["success"] = False
         response["message"] = (
-            "Appointment saved locally, but Google Calendar access has expired."
+            "Google Calendar access expired. Appointment was not created. "
+            "Please reconnect your calendar and try again."
         )
+        db.delete(appointment)
+        db.commit()
+        return response
+    if google_event_id is None:
+        response["success"] = False
+        response["message"] = (
+            "Could not add the appointment to Google Calendar. Please try again."
+        )
+        db.delete(appointment)
+        db.commit()
+        return response
     return response
 
 
@@ -256,6 +309,7 @@ def _modify_appointment_sync(
     new_date: str,
     new_time: str,
 ) -> dict[str, Any]:
+    new_date = _normalize_date(new_date)
     appointment = (
         db.query(Appointment)
         .filter(Appointment.id == appointment_id, Appointment.user_id == user_id)
@@ -338,6 +392,7 @@ async def fetch_slots(db: Session, date: str) -> list[str]:
 async def book_appointment(
     db: Session, user_id: int, name: str, date: str, time: str
 ) -> dict[str, Any]:
+    """Book an appointment. user_id is required (obtain from identify_user first)."""
     return await asyncio.to_thread(
         _book_appointment_sync, db, user_id, name, date, time
     )

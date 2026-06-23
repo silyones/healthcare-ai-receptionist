@@ -39,6 +39,17 @@ export default function CalendarConnect({ onStartCall }: Props) {
         return
       }
 
+      if (calendarFlag === 'error') {
+        const message = params.get('message') ?? 'Failed to connect Google Calendar.'
+        if (!cancelled) {
+          setError(message)
+          setConnected(false)
+        }
+        window.history.replaceState({}, '', window.location.pathname)
+        setCheckingStatus(false)
+        return
+      }
+
       if (!returnedPhone) {
         setCheckingStatus(false)
         return

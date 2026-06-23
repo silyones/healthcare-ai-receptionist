@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -22,6 +23,8 @@ from tools import (
 from ws_tools import tool_ws_manager
 
 load_dotenv()
+DISPATCH_DEBOUNCE_SECONDS = 8.0
+_last_dispatch_by_room: dict[str, float] = {}
 
 
 @asynccontextmanager
@@ -94,10 +97,11 @@ def health():
 
 
 @app.post("/token")
-def create_livekit_token(req: TokenRequest):
+async def create_livekit_token(req: TokenRequest):
     api_key = os.getenv("LIVEKIT_API_KEY")
     api_secret = os.getenv("LIVEKIT_API_SECRET")
     livekit_url = os.getenv("LIVEKIT_URL")
+    agent_name = os.getenv("LIVEKIT_AGENT_NAME", "mykare-receptionist")
 
     if not api_key or not api_secret or not livekit_url:
         raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
@@ -109,6 +113,27 @@ def create_livekit_token(req: TokenRequest):
         .with_grants(api.VideoGrants(room_join=True, room=req.room_name))
         .to_jwt()
     )
+
+    # React StrictMode/dev can call /token twice. Debounce dispatch per room
+    # to avoid spawning duplicate agent jobs while keeping assignment reliable.
+    now = time.monotonic()
+    last_dispatch = _last_dispatch_by_room.get(req.room_name, 0.0)
+    if now - last_dispatch >= DISPATCH_DEBOUNCE_SECONDS:
+        _last_dispatch_by_room[req.room_name] = now
+        api_url = livekit_url.replace("wss://", "https://")
+        lkapi = api.LiveKitAPI(url=api_url, api_key=api_key, api_secret=api_secret)
+        try:
+            await lkapi.agent_dispatch.create_dispatch(
+                api.CreateAgentDispatchRequest(
+                    agent_name=agent_name,
+                    room=req.room_name,
+                )
+            )
+        except Exception:
+            pass
+        finally:
+            await lkapi.aclose()
+
     return {"token": token, "url": livekit_url, "room": req.room_name}
 
 
