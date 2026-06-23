@@ -40,6 +40,33 @@ class ClinicUserData:
     user_id: int | None = None
 
 
+async def _publish_tool_event(ctx: RunContext[ClinicUserData], message: str) -> None:
+    try:
+        room = ctx.session.room
+        if room and room.local_participant:
+            payload = json.dumps({"type": "tool", "message": message})
+            await room.local_participant.publish_data(payload.encode(), reliable=True)
+    except Exception:
+        pass
+
+
+async def _publish_summary(ctx: RunContext[ClinicUserData], result: dict) -> None:
+    try:
+        room = ctx.session.room
+        if room and room.local_participant:
+            payload = json.dumps(
+                {
+                    "type": "summary",
+                    "summary": result.get("summary", ""),
+                    "appointments": result.get("appointments", []),
+                    "timestamp": result.get("timestamp", ""),
+                }
+            )
+            await room.local_participant.publish_data(payload.encode(), reliable=True)
+    except Exception:
+        pass
+
+
 def build_agent_tools(llm: groq.LLM) -> list:
     """Register tools from tools.py as LLM function tools.
 
@@ -51,10 +78,12 @@ def build_agent_tools(llm: groq.LLM) -> list:
         ctx: RunContext[ClinicUserData], phone_number: str
     ) -> str:
         """Find or create a user by phone number and return their profile."""
+        await _publish_tool_event(ctx, "Identifying user…")
         db = SessionLocal()
         try:
             result = await identify_user(db, phone_number)
             ctx.userdata.user_id = result["id"]
+            await _publish_tool_event(ctx, f"User identified: {result['name']}")
             return json.dumps(result)
         finally:
             db.close()
@@ -62,9 +91,11 @@ def build_agent_tools(llm: groq.LLM) -> list:
     @function_tool
     async def fetch_slots_tool(ctx: RunContext[ClinicUserData], date: str) -> str:
         """Return available appointment slots for a given date (YYYY-MM-DD)."""
+        await _publish_tool_event(ctx, f"Fetching slots for {date}…")
         db = SessionLocal()
         try:
             slots = await fetch_slots(db, date)
+            await _publish_tool_event(ctx, f"Found {len(slots)} available slots")
             return json.dumps({"date": date, "available_slots": slots})
         finally:
             db.close()
@@ -79,11 +110,14 @@ def build_agent_tools(llm: groq.LLM) -> list:
         """Book an appointment after confirming the user's name, date, and time."""
         if ctx.userdata.user_id is None:
             return json.dumps({"success": False, "message": "Identify the user first."})
+        await _publish_tool_event(ctx, f"Booking appointment on {date} at {time}…")
         db = SessionLocal()
         try:
             result = await book_appointment(
                 db, ctx.userdata.user_id, name, date, time
             )
+            if result.get("success"):
+                await _publish_tool_event(ctx, "Booking confirmed ✅")
             return json.dumps(result)
         finally:
             db.close()
@@ -93,6 +127,7 @@ def build_agent_tools(llm: groq.LLM) -> list:
         """List active appointments for the identified user."""
         if ctx.userdata.user_id is None:
             return json.dumps({"success": False, "message": "Identify the user first."})
+        await _publish_tool_event(ctx, "Retrieving appointments…")
         db = SessionLocal()
         try:
             appointments = await retrieve_appointments(db, ctx.userdata.user_id)
@@ -107,6 +142,7 @@ def build_agent_tools(llm: groq.LLM) -> list:
         """Cancel an appointment by ID for the identified user."""
         if ctx.userdata.user_id is None:
             return json.dumps({"success": False, "message": "Identify the user first."})
+        await _publish_tool_event(ctx, f"Cancelling appointment #{appointment_id}…")
         db = SessionLocal()
         try:
             result = await cancel_appointment(
@@ -126,6 +162,7 @@ def build_agent_tools(llm: groq.LLM) -> list:
         """Reschedule an appointment to a new date and time."""
         if ctx.userdata.user_id is None:
             return json.dumps({"success": False, "message": "Identify the user first."})
+        await _publish_tool_event(ctx, "Modifying appointment…")
         db = SessionLocal()
         try:
             result = await modify_appointment(
@@ -146,9 +183,11 @@ def build_agent_tools(llm: groq.LLM) -> list:
         """End the conversation, store a summary, and return final details."""
         if ctx.userdata.user_id is None:
             return json.dumps({"success": False, "message": "Identify the user first."})
+        await _publish_tool_event(ctx, "Wrapping up conversation…")
         db = SessionLocal()
         try:
             result = await end_conversation(db, ctx.userdata.user_id, summary)
+            await _publish_summary(ctx, result)
             return json.dumps(result)
         finally:
             db.close()

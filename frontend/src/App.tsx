@@ -1,15 +1,46 @@
+import { useState } from 'react'
+import CalendarConnect from './components/CalendarConnect'
+import CallSummary from './components/CallSummary'
+import VoiceAgent from './components/VoiceAgent'
+import type { AppScreen, CallSummaryData } from './types'
+
 function App() {
+  const [screen, setScreen] = useState<AppScreen>('connect')
+  const [phone, setPhone] = useState('')
+  const [summaryData, setSummaryData] = useState<CallSummaryData | null>(null)
+
+  if (screen === 'call' && phone) {
+    return (
+      <VoiceAgent
+        phone={phone}
+        onEndCall={(data) => {
+          setSummaryData(data)
+          setScreen('summary')
+        }}
+        onCancel={() => setScreen('connect')}
+      />
+    )
+  }
+
+  if (screen === 'summary' && summaryData) {
+    return (
+      <CallSummary
+        data={summaryData}
+        onDone={() => {
+          setSummaryData(null)
+          setScreen('connect')
+        }}
+      />
+    )
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold text-gray-900 mb-4">
-          Healthcare AI Receptionist
-        </h1>
-        <p className="text-gray-600">
-          Voice-powered appointment scheduling
-        </p>
-      </div>
-    </div>
+    <CalendarConnect
+      onStartCall={(p) => {
+        setPhone(p)
+        setScreen('call')
+      }}
+    />
   )
 }
 

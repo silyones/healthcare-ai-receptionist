@@ -70,7 +70,9 @@ def callback(code: str, state: str, db: Session = Depends(get_db)):
     user.google_calendar_connected = bool(credentials.refresh_token)
     db.commit()
 
-    return {"success": True, "phone_number": phone_number, "calendar_connected": True}
+    return RedirectResponse(
+        url=f"http://localhost:5173/?calendar=connected&phone={phone_number}"
+    )
 
 
 @router.get("/status")
