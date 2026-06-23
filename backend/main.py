@@ -25,6 +25,15 @@ load_dotenv()
 DISPATCH_DEBOUNCE_SECONDS = 8.0
 _last_dispatch_by_room: dict[str, float] = {}
 
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,https://echocare-tau.vercel.app",
+    ).split(",")
+    if origin.strip()
+]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,7 +45,7 @@ app = FastAPI(title="Healthcare AI Receptionist", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
