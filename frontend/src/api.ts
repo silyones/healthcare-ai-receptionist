@@ -24,19 +24,11 @@ export async function identifyUser(phone: string) {
   return apiFetch<{
     id: number
     phone_number: string
-    name: string
-    google_calendar_connected: boolean
+    name: string | null
   }>('/api/identify', {
     method: 'POST',
     body: JSON.stringify({ phone }),
   })
-}
-
-export async function getAuthStatus(phone: string) {
-  return apiFetch<{
-    phone_number: string
-    google_calendar_connected: boolean
-  }>(`/auth/status?phone=${encodeURIComponent(phone)}`)
 }
 
 export async function getLiveKitToken(roomName: string, participantName: string) {
@@ -75,8 +67,4 @@ export async function endConversation(userId: number, summary: string) {
     method: 'POST',
     body: JSON.stringify({ user_id: userId, summary }),
   })
-}
-
-export function connectGoogleCalendar(phone: string) {
-  window.location.href = `${API_URL}/auth/login?phone=${encodeURIComponent(phone)}`
 }

@@ -9,7 +9,6 @@ from livekit import api
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth import router as auth_router
 from db import get_db, init_db
 from tools import (
     book_appointment,
@@ -42,9 +41,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.include_router(auth_router)
-
 
 class IdentifyRequest(BaseModel):
     phone: str

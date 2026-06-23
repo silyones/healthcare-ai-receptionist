@@ -1,5 +1,4 @@
 import { lazy, Suspense, useState } from 'react'
-import CalendarConnect from './components/CalendarConnect'
 import CallSummary from './components/CallSummary'
 import ErrorBoundary from './components/ErrorBoundary'
 import LoadingSpinner from './components/LoadingSpinner'
@@ -9,17 +8,13 @@ import type { AppScreen, CallSummaryData } from './types'
 const VoiceAgent = lazy(() => import('./components/VoiceAgent'))
 
 function App() {
-  const [screen, setScreen] = useState<AppScreen>('connect')
-  const [phone, setPhone] = useState('')
+  const [screen, setScreen] = useState<AppScreen>('call')
+  const [callKey, setCallKey] = useState(0)
   const [summaryData, setSummaryData] = useState<CallSummaryData | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
 
   const navbarSubtitle =
-    screen === 'call'
-      ? 'Voice call with Aria'
-      : screen === 'summary'
-        ? 'Call summary'
-        : 'Connect your calendar to get started'
+    screen === 'call' ? 'Voice call with Aria' : 'Call summary'
 
   const handleEndCall = (data: CallSummaryData) => {
     setSummaryLoading(true)
@@ -33,7 +28,17 @@ function App() {
       <Navbar subtitle={navbarSubtitle} />
       <main className="flex-1 flex flex-col min-h-0">
         <ErrorBoundary>
-          {screen === 'call' && phone ? (
+          {screen === 'summary' && summaryData ? (
+            <CallSummary
+              data={summaryData}
+              loading={summaryLoading}
+              onDone={() => {
+                setSummaryData(null)
+                setScreen('call')
+                setCallKey((key) => key + 1)
+              }}
+            />
+          ) : (
             <Suspense
               fallback={
                 <div className="flex-1 flex items-center justify-center">
@@ -41,29 +46,9 @@ function App() {
                 </div>
               }
             >
-              <VoiceAgent
-                phone={phone}
-                onEndCall={handleEndCall}
-                onCancel={() => setScreen('connect')}
-              />
+              <VoiceAgent key={callKey} onEndCall={handleEndCall} />
             </Suspense>
-          ) : screen === 'summary' && summaryData ? (
-          <CallSummary
-            data={summaryData}
-            loading={summaryLoading}
-            onDone={() => {
-              setSummaryData(null)
-              setScreen('connect')
-            }}
-          />
-        ) : (
-          <CalendarConnect
-            onStartCall={(p) => {
-              setPhone(p)
-              setScreen('call')
-            }}
-          />
-        )}
+          )}
         </ErrorBoundary>
       </main>
     </div>

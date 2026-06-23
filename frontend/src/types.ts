@@ -12,7 +12,7 @@ export type CallSummaryData = {
   timestamp: string
 }
 
-export type AppScreen = 'connect' | 'call' | 'summary'
+export type AppScreen = 'call' | 'summary'
 
 export type ToolFeedItem = {
   id: string
@@ -29,5 +29,6 @@ export type ToolWsMessage = {
   summary?: string
   appointments?: Appointment[]
   user_name?: string
+  user_id?: number
   timestamp?: string
 }

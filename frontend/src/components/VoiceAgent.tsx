@@ -8,15 +8,14 @@ import {
   useRoomContext,
 } from '@livekit/components-react'
 import { ConnectionState, type RemoteParticipant } from 'livekit-client'
-import { getLiveKitToken, getToolsWsUrl } from '../api'
+import { getAppointments, getLiveKitToken, getToolsWsUrl, identifyUser } from '../api'
 import type { CallSummaryData, ToolFeedItem, ToolWsMessage } from '../types'
-import CalendarExpiredBanner from './CalendarExpiredBanner'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import ariaAvatar from '../../star.jpg'
 import LoadingSpinner from './LoadingSpinner'
 
 type Props = {
-  phone: string
   onEndCall: (summary: CallSummaryData) => void
-  onCancel: () => void
 }
 
 function ToolFeed({ items }: { items: ToolFeedItem[] }) {
@@ -166,7 +165,6 @@ function CallUI({
 
   const [feedItems, setFeedItems] = useState<ToolFeedItem[]>([])
   const [ending, setEnding] = useState(false)
-  const [calendarExpired, setCalendarExpired] = useState(false)
   const onEndCallRef = useRef(onEndCall)
   onEndCallRef.current = onEndCall
 
@@ -182,12 +180,11 @@ function CallUI({
       },
     ])
 
-    if (data.tool === 'calendar_auth' && data.status === 'error') {
-      setCalendarExpired(true)
-    }
-
     if (data.tool === 'identify_user' && data.status === 'done' && data.user_name) {
       localStorage.setItem('clinic_user_name', data.user_name)
+      if (typeof data.user_id === 'number') {
+        localStorage.setItem('clinic_user_id', String(data.user_id))
+      }
     }
 
     if (
@@ -224,13 +221,24 @@ function CallUI({
     }
   }, [roomName, handleToolMessage])
 
-  const handleEndCall = () => {
+  const handleEndCall = async () => {
     if (ending) return
     setEnding(true)
     room.disconnect()
+    let appointments: CallSummaryData['appointments'] = []
+    const userIdRaw = localStorage.getItem('clinic_user_id')
+    const userId = userIdRaw ? Number.parseInt(userIdRaw, 10) : Number.NaN
+    if (!Number.isNaN(userId)) {
+      try {
+        const data = await getAppointments(userId)
+        appointments = data.appointments
+      } catch {
+        // fallback to empty appointments if fetch fails
+      }
+    }
     onEndCall({
       summary: 'Call ended. Thank you for visiting the clinic.',
-      appointments: [],
+      appointments,
       user_name: localStorage.getItem('clinic_user_name') ?? 'Guest',
       timestamp: new Date().toISOString(),
     })
@@ -263,15 +271,6 @@ function CallUI({
         </div>
         <span className="text-accent text-xs sm:text-sm shrink-0">{statusLabel}</span>
       </div>
-
-      {calendarExpired && (
-        <div className="px-4 sm:px-6 pt-4">
-          <CalendarExpiredBanner
-            phone={phone}
-            onDismiss={() => setCalendarExpired(false)}
-          />
-        </div>
-      )}
 
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_minmax(260px,320px)] gap-4 sm:gap-6 p-4 sm:p-6 min-h-0 overflow-auto">
         <div className="flex flex-col items-center justify-center gap-4 sm:gap-6 order-2 lg:order-1">
@@ -316,10 +315,83 @@ function CallUI({
   )
 }
 
-export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
+function PreCallScreen({
+  phone,
+  onPhoneChange,
+  onStart,
+  starting,
+  error,
+}: {
+  phone: string
+  onPhoneChange: (value: string) => void
+  onStart: () => void
+  starting: boolean
+  error: string | null
+}) {
+  return (
+    <div className="flex-1 flex items-center justify-center p-4 sm:p-6">
+      <div className="bg-card text-text-light rounded-2xl shadow-xl w-full max-w-md p-6 sm:p-8">
+        <div className="text-center mb-6 sm:mb-8">
+          <div className="flex justify-center mb-4">
+            <Avatar className="h-24 w-24 sm:h-28 sm:w-28">
+              <AvatarImage src={ariaAvatar} alt="Aria" />
+              <AvatarFallback className="bg-button-dark text-white text-2xl font-bold">
+                A
+              </AvatarFallback>
+            </Avatar>
+          </div>
+          <h2 className="text-xl sm:text-2xl font-bold mb-2">Welcome to Mykare</h2>
+          <p className="text-text-light/70 text-sm">
+            Enter your phone number and start a voice call with Aria to book
+            appointments.
+          </p>
+        </div>
+
+        <label className="block text-sm font-medium mb-2" htmlFor="phone">
+          Phone number
+        </label>
+        <input
+          id="phone"
+          type="tel"
+          value={phone}
+          onChange={(e) => onPhoneChange(e.target.value)}
+          placeholder="+1 (555) 123-4567"
+          disabled={starting}
+          className="w-full border border-text-light/20 rounded-lg px-4 py-3 mb-4 focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60"
+        />
+
+        {error && (
+          <p className="text-red-600 text-sm mb-4" role="alert">
+            {error}
+          </p>
+        )}
+
+        <button
+          type="button"
+          onClick={onStart}
+          disabled={starting || !phone.trim()}
+          className="w-full bg-button-dark hover:bg-button-dark/90 text-white font-semibold py-3 rounded-lg transition disabled:opacity-60 flex items-center justify-center gap-2"
+        >
+          {starting && (
+            <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          )}
+          {starting ? 'Starting call…' : 'Start Call'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export default function VoiceAgent({ onEndCall }: Props) {
+  const [phone, setPhone] = useState(
+    () => localStorage.getItem('clinic_phone') ?? '',
+  )
+  const [callStarted, setCallStarted] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [setupError, setSetupError] = useState<string | null>(null)
   const [token, setToken] = useState<string | null>(null)
   const [serverUrl, setServerUrl] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [disconnected, setDisconnected] = useState(false)
 
@@ -328,7 +400,42 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
     [phone],
   )
 
+  const handleStartCall = async () => {
+    if (!phone.trim()) {
+      setSetupError('Please enter your phone number.')
+      return
+    }
+    setSetupError(null)
+    setStarting(true)
+    try {
+      const user = await identifyUser(phone.trim())
+      localStorage.setItem('clinic_phone', phone.trim())
+      localStorage.setItem('clinic_user_id', String(user.id))
+      if (user.name) {
+        localStorage.setItem('clinic_user_name', user.name)
+      }
+      setCallStarted(true)
+    } catch (err) {
+      setSetupError(err instanceof Error ? err.message : 'Failed to start call.')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const resetCall = () => {
+    setCallStarted(false)
+    setToken(null)
+    setServerUrl(null)
+    setLoading(false)
+    setError(null)
+    setDisconnected(false)
+  }
+
   useEffect(() => {
+    if (!callStarted) {
+      return
+    }
+
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -354,7 +461,19 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
     return () => {
       cancelled = true
     }
-  }, [roomName, phone])
+  }, [callStarted, roomName, phone])
+
+  if (!callStarted) {
+    return (
+      <PreCallScreen
+        phone={phone}
+        onPhoneChange={setPhone}
+        onStart={handleStartCall}
+        starting={starting}
+        error={setupError}
+      />
+    )
+  }
 
   if (loading) {
     return (
@@ -374,10 +493,10 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
           </p>
           <button
             type="button"
-            onClick={onCancel}
+            onClick={resetCall}
             className="bg-button-dark text-white px-6 py-2.5 rounded-lg w-full sm:w-auto"
           >
-            Go Back
+            Try Again
           </button>
         </div>
       </div>
@@ -393,10 +512,10 @@ export default function VoiceAgent({ phone, onEndCall, onCancel }: Props) {
           </p>
           <button
             type="button"
-            onClick={onCancel}
+            onClick={resetCall}
             className="bg-button-dark text-white px-6 py-2.5 rounded-lg w-full sm:w-auto"
           >
-            Go Back
+            Try Again
           </button>
         </div>
       </div>

@@ -47,6 +47,13 @@ def build_system_prompt() -> str:
 
     return f"""You are Aria, a clinic front-desk AI. Be brief. Always identify user by phone first. Then help book, check, modify or cancel appointments. Confirm details before any action. One sentence responses only.
 
+Conversation flow (follow in order):
+1) First ask for the user's name and phone number.
+2) After getting both, ask: can I book an appointment for you?
+3) If user says yes, collect date/time and book exactly as user requests.
+4) Do not skip steps, and do not book before step 2 is completed.
+5) When user provides their name, acknowledge simply as: "Okay <name>, can I help you schedule an appointment?" Do not mention profile status, records, or internal system details.
+
 Current date and time (authoritative — use for all scheduling):
 - Today is {now.strftime("%A")}, {today_display} ({today_iso})
 - Current time: {time_display} ({tz_label})
@@ -58,6 +65,7 @@ Scheduling rules:
 - If the user does not specify a year, assume {now.year}.
 - IMPORTANT: Never call identify_user_tool until the user has actually spoken their phone number. Wait for the user to say digits before calling any tool.
 - CRITICAL: You must NEVER write tool calls as text in your response. NEVER output <function=...> in your speech. Only use the actual function calling mechanism. If you need to call a tool, call it silently and then speak the result to the user.
+- If identify_user_tool returns name as null, ask the user for their real name before booking.
 
 Voice output rules (everything you say is spoken aloud by Cartesia Sonic TTS):
 - Use full sentences with normal capitalization and end each reply with . ? or !
@@ -153,6 +161,7 @@ def build_agent_tools(llm: groq.LLM) -> list:
                 "done",
                 f"User identified: {result['name']}",
                 user_name=result["name"],
+                user_id=result["id"],
             )
             logger.info("TOOL RESULT: identify_user_tool %s", result)
             return json.dumps(result)
@@ -214,13 +223,6 @@ def build_agent_tools(llm: groq.LLM) -> list:
                     "success": False,
                     "message": f"Booking failed: {exc}",
                 }
-            if result.get("calendar_token_expired"):
-                await _emit(
-                    ctx,
-                    "calendar_auth",
-                    "error",
-                    "Google Calendar session expired. Please reconnect your calendar.",
-                )
             if result.get("success"):
                 display_date = _format_display_date(date)
                 await _emit(
@@ -288,13 +290,6 @@ def build_agent_tools(llm: groq.LLM) -> list:
             result = await cancel_appointment(
                 db, appointment_id, ctx.userdata.user_id
             )
-            if result.get("calendar_token_expired"):
-                await _emit(
-                    ctx,
-                    "calendar_auth",
-                    "error",
-                    "Google Calendar session expired. Please reconnect your calendar.",
-                )
             if result.get("success"):
                 await _emit(
                     ctx,
@@ -337,13 +332,6 @@ def build_agent_tools(llm: groq.LLM) -> list:
                 new_date,
                 new_time,
             )
-            if result.get("calendar_token_expired"):
-                await _emit(
-                    ctx,
-                    "calendar_auth",
-                    "error",
-                    "Google Calendar session expired. Please reconnect your calendar.",
-                )
             if result.get("success"):
                 await _emit(
                     ctx,
@@ -460,17 +448,12 @@ async def entrypoint(ctx: JobContext):
     await ctx.connect()
 
     identified = await _identify_caller_from_room(ctx, session)
-    if identified:
-        await session.generate_reply(
-            instructions=(
-                "Greet the user warmly as Aria. They are already signed in from the app. "
-                "Ask how you can help with their appointment today."
-            )
+    _ = identified
+    await session.generate_reply(
+        instructions=(
+            "Say exactly: Hi, I am Aria! Please tell me your name and phone number."
         )
-    else:
-        await session.generate_reply(
-            instructions="Say: Hello! I am Aria. What is your phone number?"
-        )
+    )
 
 
 if __name__ == "__main__":

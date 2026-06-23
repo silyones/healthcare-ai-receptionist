@@ -27,5 +27,5 @@ def find_user_by_phone(db: Session, phone: str) -> User | None:
         return None
     if len(matches) == 1:
         return matches[0]
-    # Same phone stored under different formats — prefer the calendar-linked account.
-    return max(matches, key=lambda user: (user.google_calendar_connected, user.id))
+    # Same phone stored under different formats — prefer the most recent record.
+    return max(matches, key=lambda user: user.id)
