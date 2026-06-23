@@ -108,10 +108,10 @@ CLINIC_TIMEZONE=Asia/Kolkata
 API_URL=http://localhost:8000
 ```
 
-Optional frontend override in `frontend/.env`:
+Optional frontend override (set at **build time** for production):
 
 ```env
-VITE_API_URL=http://localhost:8000
+VITE_API_BASE_URL=https://healthcare-ai-receptionist-production.up.railway.app
 ```
 
 ## Setup
@@ -243,7 +243,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 python agent.py start   # LiveKit agent worker (not dev)
 ```
 
-Serve `frontend/dist` via any static host; set `VITE_API_URL` to your API origin at build time.
+Serve `frontend/dist` via any static host; set `VITE_API_BASE_URL` to your API origin at build time.
 
 ## Troubleshooting
 
