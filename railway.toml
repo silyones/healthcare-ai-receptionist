@@ -2,4 +2,4 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT & cd backend && python agent.py start"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT & python agent.py start"
