@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from tools import (
 from ws_tools import tool_ws_manager
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 DISPATCH_DEBOUNCE_SECONDS = 8.0
 _last_dispatch_by_room: dict[str, float] = {}
 
@@ -134,8 +136,16 @@ async def create_livekit_token(req: TokenRequest):
                     room=req.room_name,
                 )
             )
-        except Exception:
-            pass
+            logger.info(
+                "Dispatched agent %s to room %s", agent_name, req.room_name
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to dispatch agent %s to room %s: %s",
+                agent_name,
+                req.room_name,
+                exc,
+            )
         finally:
             await lkapi.aclose()
 
