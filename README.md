@@ -2,22 +2,28 @@
 
 EchoCareAI is a healthcare voice receptionist that lets patients call in, speak naturally with an AI agent named **Aria**, and book, check, modify, or cancel clinic appointments. Appointments are stored in a local SQLite database with hardcoded availability slots and double-booking prevention.
 
+**Production URLs (example deployment)**
+
+| Service | URL |
+|---------|-----|
+| Frontend (Vercel) | https://echocareai.vercel.app |
+| Backend API (Railway) | https://healthcare-ai-receptionist-production.up.railway.app |
+
 ## Architecture
 
 ```
-┌─────────────────┐     WebSocket (tool events)     ┌──────────────────┐
-│  React Frontend │ ◄────────────────────────────── │  FastAPI Backend │
-│  (Vite + LK)    │     REST API + LiveKit token    │  (main.py)       │
-└────────┬────────┘                                 └────────┬─────────┘
-         │                                                   │
-         │  LiveKit WebRTC audio                             │  SQLite
-         ▼                                                   ▼
-┌─────────────────┐                                 ┌──────────────────┐
-│  LiveKit Cloud  │ ◄── agent dispatch ──────────── │  LiveKit Agent   │
-│  (room audio)   │                                 │  (agent.py)      │
-└─────────────────┘                                 └──────────────────┘
-                                                           │
-                     Deepgram STT · Groq LLM · Cartesia TTS
+┌─────────────────┐     WebSocket (tool events)     ┌──────────────────────────────┐
+│  React Frontend │ ◄────────────────────────────── │  Railway (single service)    │
+│  (Vite + LK)    │     REST API + LiveKit token    │  ┌──────────┐ ┌───────────┐ │
+└────────┬────────┘                                 │  │ FastAPI  │ │ LiveKit   │ │
+         │                                          │  │ uvicorn  │ │ agent.py  │ │
+         │  LiveKit WebRTC audio                    │  │ :$PORT   │ │ (worker)  │ │
+         ▼                                          │  └──────────┘ └───────────┘ │
+┌─────────────────┐     agent dispatch              │         start.sh             │
+│  LiveKit Cloud  │ ◄───────────────────────────────┴──────────────────────────────┘
+│  (room audio)   │              SQLite
+└─────────────────┘
+         Deepgram STT · Groq LLM · Cartesia TTS
 ```
 
 | Layer | Tech |
@@ -26,35 +32,44 @@ EchoCareAI is a healthcare voice receptionist that lets patients call in, speak 
 | Backend API | FastAPI, SQLAlchemy, SQLite |
 | Voice agent | LiveKit Agents, Deepgram (STT), Groq (LLM), Cartesia (TTS) |
 | Realtime | LiveKit Cloud rooms + WebSocket activity feed |
+| Deploy | Railway (backend), Vercel (frontend) |
+
+On **Railway**, one service runs both processes via `backend/start.sh`: the LiveKit agent worker in the background and FastAPI (uvicorn) in the foreground on `$PORT`.
 
 ## Project structure
 
 ```
 voice-assistant/
+├── railway.toml              # Deploy config (repo root)
 ├── backend/
 │   ├── agent.py              # LiveKit voice agent (Aria)
 │   ├── main.py               # FastAPI server, tokens, REST, WebSocket
+│   ├── start.sh              # Production: agent + uvicorn in one container
 │   ├── tools.py              # Appointment CRUD, slots, identify user
 │   ├── models.py             # SQLAlchemy models
 │   ├── db.py                 # DB engine + migrations runner
 │   ├── phone_utils.py        # Phone normalization / lookup
-│   ├── tool_events.py        # Emit tool events to frontend WS
+│   ├── tool_events.py        # Agent → API → WebSocket activity feed
 │   ├── ws_tools.py           # WebSocket connection manager
 │   ├── migrations/           # SQL migrations (applied on startup)
+│   ├── nixpacks.toml         # Railway/Nixpacks Python version
+│   ├── railway.toml          # Deploy config when Root Directory = /backend
+│   ├── railway.agent.toml    # Optional: separate agent-only Railway service
 │   ├── requirements.txt
 │   └── .env                  # Secrets (not committed)
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx           # Screen routing (call ↔ summary)
-│   │   ├── api.ts            # Backend API client
+│   │   ├── api.ts            # Backend API + WebSocket URL helpers
 │   │   ├── components/
 │   │   │   ├── VoiceAgent.tsx    # Call UI, LiveKit room, activity feed
-│   │   │   ├── OrbComponent.tsx  # Animated AI orb (canvas)
+│   │   │   ├── AgentAvatar.tsx   # In-call avatar (speaking animation)
+│   │   │   ├── OrbComponent.tsx  # Canvas plasma orb (available, optional)
 │   │   │   ├── Navbar.tsx
 │   │   │   ├── CallSummary.tsx
-│   │   │   └── ui/avatar.tsx     # shadcn-style Avatar
+│   │   │   └── ui/avatar.tsx
 │   │   └── hooks/
-│   │       └── useAgentTalking.ts  # Audio RMS → isTalking
+│   │       └── useAgentTalking.ts
 │   ├── vite.config.ts
 │   └── package.json
 └── README.md
@@ -63,16 +78,16 @@ voice-assistant/
 ## Features
 
 - **Voice-first booking** — Patients talk to Aria; no forms during the call.
-- **User identification** — Lookup or create user by phone number.
+- **User identification** — Lookup or create user by phone number before joining the room.
 - **Hardcoded slots** — `10:00 AM`, `11:00 AM`, `2:00 PM`, `3:00 PM`, `4:00 PM` per day.
 - **Double-booking prevention** — Same date + time cannot be booked twice while `active`.
 - **Live activity feed** — Tool calls (identify, fetch slots, book, etc.) stream to the UI via WebSocket.
 - **Call summary** — End-of-call screen with summary and appointment list.
-- **Animated agent orb** — Canvas-based plasma orb reacts when the agent is speaking.
+- **Animated agent avatar** — Speaking indicator on the in-call screen.
 
 ## Prerequisites
 
-- **Python 3.11+**
+- **Python 3.12+** (matches `backend/nixpacks.toml`)
 - **Node.js 20+**
 - Accounts / API keys for:
   - [LiveKit Cloud](https://livekit.io/)
@@ -82,7 +97,7 @@ voice-assistant/
 
 ## Environment variables
 
-Create `backend/.env` (never commit real keys):
+Create `backend/.env` locally (never commit real keys):
 
 ```env
 # LiveKit
@@ -106,13 +121,24 @@ DATABASE_URL=sqlite:///./appointments.db
 # Optional
 CLINIC_TIMEZONE=Asia/Kolkata
 API_URL=http://localhost:8000
+CORS_ORIGINS=http://localhost:5173,https://echocareai.vercel.app
 ```
 
-Optional frontend override (set at **build time** for production):
+### Frontend (build time)
+
+Set in Vercel (or `.env` for local builds):
 
 ```env
 VITE_API_BASE_URL=https://healthcare-ai-receptionist-production.up.railway.app
 ```
+
+Vite bakes this into the bundle at **build time**. After changing it, redeploy the frontend.
+
+### Railway (backend service)
+
+Copy the same `backend/.env` values into **Railway → Variables** for the API service. When API and agent run in one container (`start.sh`), they share the same env.
+
+`API_URL` defaults to `http://127.0.0.1:$PORT` in `tool_events.py` so the agent can POST tool events to the local FastAPI process inside the same container. You usually do not need to set `API_URL` on Railway unless debugging.
 
 ## Setup
 
@@ -136,7 +162,7 @@ npm install
 
 ## Running locally
 
-Use **three terminals**:
+Use **three terminals** (same as production logic, but agent uses `dev` mode):
 
 **Terminal 1 — API server**
 
@@ -166,6 +192,70 @@ Open [http://localhost:5173](http://localhost:5173).
 3. Speak with Aria to book or manage appointments
 4. **End Call** → view summary
 
+## Deploying to Railway (backend)
+
+One Railway service runs **both** the API and the LiveKit agent worker.
+
+### Service settings
+
+| Setting | Value |
+|---------|--------|
+| **Root Directory** | `/backend` |
+| **Start command** | `sh start.sh` (from `railway.toml`) |
+| **Builder** | Nixpacks (`backend/nixpacks.toml`) |
+
+`start.sh` does the following:
+
+```sh
+python agent.py start &                              # LiveKit worker (background)
+exec python -m uvicorn main:app --host 0.0.0.0 --port "$PORT"   # API (foreground)
+```
+
+Uvicorn **must** stay in the foreground on `$PORT` — that is what Railway’s public URL proxies to.
+
+### Networking (critical)
+
+After deploy, check **Deploy Logs** for the port uvicorn binds to, e.g.:
+
+```
+INFO: Uvicorn running on http://0.0.0.0:8080
+```
+
+In **Settings → Networking**, the domain’s target port **must match** that port (e.g. `8080`, not `8000`). A mismatch causes **502 Bad Gateway** on `/health` and `/api/identify` even when the app started successfully.
+
+### Verify deployment
+
+```text
+GET https://your-service.up.railway.app/health
+→ {"status":"ok"}
+```
+
+Deploy logs should show **both**:
+
+- `Uvicorn running on http://0.0.0.0:...`
+- `registered worker` with `agent_name: mykare-receptionist`
+
+### Optional: split into two Railway services
+
+For higher reliability, you can run API and agent separately:
+
+| Service | Start command | Public domain |
+|---------|---------------|---------------|
+| API | `python -m uvicorn main:app --host 0.0.0.0 --port $PORT` | Yes |
+| Agent | `python agent.py start` | No |
+
+See `backend/railway.agent.toml` for the agent-only config. Both services need the same LiveKit and AI provider env vars.
+
+## Deploying to Vercel (frontend)
+
+1. Import the repo and set **Root Directory** to `frontend`.
+2. Add environment variable:
+   ```env
+   VITE_API_BASE_URL=https://your-railway-service.up.railway.app
+   ```
+3. Deploy. Redeploy after any change to `VITE_API_BASE_URL`.
+4. Add your Vercel URL to `CORS_ORIGINS` on Railway if it is not already covered (default includes `https://echocareai.vercel.app`).
+
 ## API reference
 
 | Method | Endpoint | Description |
@@ -181,6 +271,8 @@ Open [http://localhost:5173](http://localhost:5173).
 | `POST` | `/api/conversation/end` | Save conversation summary |
 | `WS` | `/ws/tools/{room_name}` | Real-time tool activity feed |
 | `POST` | `/api/tools/emit` | Internal: agent → WebSocket broadcast |
+
+WebSocket URLs use `wss://` when `VITE_API_BASE_URL` is HTTPS (see `frontend/src/api.ts`).
 
 ## Database schema
 
@@ -224,37 +316,25 @@ Aria exposes these tools to the LLM:
 | Screen | Route (state) | Description |
 |--------|---------------|-------------|
 | Pre-call | `call` (not started) | Phone input + Start Call |
-| In-call | `call` (started) | Orb, activity feed, End Call |
+| In-call | `call` (started) | Avatar, activity feed, End Call |
 | Summary | `summary` | Call recap + appointments |
 
-Call layout: **80%** agent panel (orb + controls), **20%** activity feed sidebar.
-
-## Building for production
-
-```powershell
-# Frontend
-cd frontend
-npm run build
-# Output: frontend/dist/
-
-# Backend — run with production ASGI server
-cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000
-python agent.py start   # LiveKit agent worker (not dev)
-```
-
-Serve `frontend/dist` via any static host; set `VITE_API_BASE_URL` to your API origin at build time.
+Call layout: **80%** agent panel (avatar + controls), **20%** activity feed sidebar.
 
 ## Troubleshooting
 
 | Issue | What to check |
 |-------|----------------|
-| Blank / crashed UI | Browser console; ensure LiveKit agent joined before speaking hooks run |
-| No agent in room | `python agent.py dev` running; `LIVEKIT_*` env vars; agent name matches dispatch |
-| Agent silent / 429 errors | Groq daily token limit — wait or upgrade tier / switch model |
-| Activity feed empty | Backend running; WebSocket `ws://localhost:8000/ws/tools/{room}` reachable |
-| Wrong user / duplicate phones | `phone_utils.py` normalizes last 10 digits; clean duplicate rows in SQLite |
-| Mic not working | Browser permission; HTTPS or localhost required |
+| **502 Bad Gateway** on API | Uvicorn port vs Railway Networking port — they must match. Check `/health` first. |
+| **CORS / Failed to fetch** | Usually a 502 side effect. Fix the API first. Then verify `CORS_ORIGINS` includes your Vercel URL. |
+| **"Aria is joining the room…" forever** | Agent worker not running. Deploy logs need `registered worker` + `mykare-receptionist`. Ensure `start.sh` is used, not uvicorn-only. |
+| **Agent dispatch fails** | API logs show `Failed to dispatch agent...`. Check `LIVEKIT_*` keys and `LIVEKIT_AGENT_NAME` matches on API and agent. |
+| **Activity feed empty** | WebSocket to `/ws/tools/{room}` must reach the API. Agent posts events via `API_URL` (defaults to `127.0.0.1:$PORT` in same container). |
+| **No agent locally** | Run `python agent.py dev` in a second terminal. |
+| **Agent silent / 429 errors** | Groq daily token limit — wait or upgrade tier / switch model. |
+| **Mic not working** | Browser permission; HTTPS or localhost required. |
+| **Wrong user / duplicate phones** | `phone_utils.py` normalizes last 10 digits; clean duplicate rows in SQLite. |
+| **Vercel still hits localhost** | `VITE_API_BASE_URL` not set at build time — redeploy Vercel after setting the variable. |
 
 ## License
 
